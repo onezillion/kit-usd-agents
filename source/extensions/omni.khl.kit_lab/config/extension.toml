@@ -1,0 +1,13 @@
+[package]
+version = "0.1.0"
+title = "KHL Kit Lab"
+description = "Development-only persistent laboratory service for a local Kit runtime."
+category = "Development"
+authors = ["KHL"]
+
+[dependencies]
+"omni.services.core" = {}
+"omni.services.transport.server.http" = {}
+
+[[python.module]]
+name = "omni.khl.kit_lab"
