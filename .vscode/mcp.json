@@ -3,6 +3,10 @@
     "kit-dev-mcp": {
       "type": "http",
       "url": "http://127.0.0.1:9902/mcp"
+    },
+    "kit-lab-runtime": {
+      "type": "http",
+      "url": "http://127.0.0.1:9910/mcp"
     }
   }
 }
