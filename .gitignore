@@ -20,3 +20,6 @@ source/modules/lc_agent/build/lib/**
 source/modules/rags/rag_modifiers/build/lib/**
 source/modules/rags/retrievers/build/lib/**
 source/modules/rags/rag_nodes/build/lib/**
+
+__pycache__/
+*.py[cod]
