@@ -1,0 +1,11 @@
+[mcp_servers.kit-dev-mcp]
+url = "http://127.0.0.1:9902/mcp"
+enabled = true
+tool_timeout_sec = 60
+default_tools_approval_mode = "auto"
+
+[mcp_servers.kit-lab-runtime]
+url = "http://127.0.0.1:9910/mcp"
+enabled = true
+tool_timeout_sec = 60
+default_tools_approval_mode = "writes"
