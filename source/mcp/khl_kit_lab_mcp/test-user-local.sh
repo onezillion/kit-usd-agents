@@ -7,4 +7,4 @@ python_bin="$HOME/kit-ai/venvs/khl-kit-lab-mcp/bin/python"
 test -x "$python_bin"
 export PYTHONPATH="$script_dir/src${PYTHONPATH:+:$PYTHONPATH}"
 
-exec "$python_bin" "$script_dir/verify.py" "$@"
+exec "$python_bin" -m unittest discover -s "$script_dir/tests" -v

@@ -7,6 +7,8 @@ venv="$HOME/kit-ai/venvs/khl-kit-lab-mcp"
 
 test -x "$uv_bin"
 mkdir -p "$HOME/kit-ai/venvs"
+mkdir -p "$HOME/kit-ai/lab/experiments"
+chmod 700 "$HOME/kit-ai/lab" "$HOME/kit-ai/lab/experiments"
 
 if ! "$uv_bin" python find 3.12 >/dev/null 2>&1; then
   "$uv_bin" python install 3.12

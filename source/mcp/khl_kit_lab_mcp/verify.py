@@ -1,8 +1,14 @@
+import argparse
 import asyncio
 import json
 import os
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from mcp import Client
+
+from khl_kit_lab_mcp.experiments import DEFAULT_EXPERIMENT_ROOT, validate_experiment_id
 
 
 EXPECTED_TOOLS = {
@@ -15,46 +21,194 @@ EXPECTED_TOOLS = {
     "kit_viewport_info",
     "kit_execute_python",
     "kit_reset_python_session",
+    "kit_experiment_start",
+    "kit_experiment_current",
+    "kit_experiment_list",
+    "kit_experiment_get",
+    "kit_experiment_note",
+    "kit_experiment_finish",
 }
 
 
-async def main() -> None:
-    endpoint = os.environ.get(
-        "KIT_LAB_MCP_ENDPOINT",
-        "http://127.0.0.1:9910/mcp",
+def payload(result: Any) -> dict[str, Any]:
+    if result.is_error:
+        raise SystemExit(f"MCP tool failed: {result.content}")
+    structured = result.structured_content
+    if isinstance(structured, dict):
+        return structured
+    for content in result.content:
+        text = getattr(content, "text", None)
+        if text:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+    raise SystemExit("MCP tool returned no object payload")
+
+
+def experiment_directory(experiment_id: str) -> Path:
+    validate_experiment_id(experiment_id)
+    root = Path(
+        os.environ.get("KIT_LAB_EXPERIMENT_ROOT", DEFAULT_EXPERIMENT_ROOT)
+    ).expanduser().resolve()
+    directory = (root / experiment_id).resolve()
+    if root not in directory.parents:
+        raise SystemExit("Experiment path escaped the configured root")
+    return directory
+
+
+def contained_record_file(directory: Path, reference: Any) -> Path:
+    raw_path = directory / str(reference or "")
+    if raw_path.is_symlink():
+        raise SystemExit("Recorded file reference must not be a symlink")
+    path = raw_path.resolve()
+    if directory not in path.parents:
+        raise SystemExit("Recorded file reference escaped the experiment directory")
+    return path
+
+
+def verify_record_files(experiment_id: str, events: list[dict[str, Any]]) -> None:
+    directory = experiment_directory(experiment_id)
+    stage_event = next(
+        (event for event in events if event.get("tool") == "kit_stage_summary"),
+        None,
     )
-    print("Endpoint:", endpoint)
+    python_event = next(
+        (event for event in events if event.get("tool") == "kit_execute_python"),
+        None,
+    )
+    if stage_event is None or python_event is None:
+        raise SystemExit("Expected recorded tool events were not returned")
+    for event in (stage_event, python_event):
+        result_file = contained_record_file(directory, event.get("result_file"))
+        if not result_file.is_file():
+            raise SystemExit(f"Missing recorded result file: {result_file}")
+    source_file = contained_record_file(directory, python_event.get("python_source_file"))
+    if not source_file.is_file() or source_file.read_text(encoding="utf-8") != "2 + 2":
+        raise SystemExit("Recorded Python source is missing or incorrect")
 
-    async with Client(endpoint) as client:
-        listed = await client.list_tools()
-        names = {tool.name for tool in listed.tools}
+
+async def check_tools(client: Client) -> None:
+    listed = await client.list_tools()
+    names = {tool.name for tool in listed.tools}
+    if names != EXPECTED_TOOLS:
         missing = sorted(EXPECTED_TOOLS - names)
-        if missing:
-            raise SystemExit(f"Missing tools: {missing}")
-        print("tool count:", len(names))
-        print("expected tools: PASS")
+        unexpected = sorted(names - EXPECTED_TOOLS)
+        raise SystemExit(f"Tool mismatch; missing={missing}, unexpected={unexpected}")
+    print("tool count: 15")
+    print("expected tools: PASS")
 
-        status = await client.call_tool("kit_lab_status", {})
-        if status.is_error:
-            raise SystemExit(f"kit_lab_status failed: {status.content}")
-        print("kit_lab_status:")
-        print(json.dumps(status.structured_content, indent=2, ensure_ascii=False))
 
-        stage = await client.call_tool("kit_stage_summary", {})
-        if stage.is_error:
-            raise SystemExit(f"kit_stage_summary failed: {stage.content}")
+async def live_verification(endpoint: str) -> None:
+    async with Client(endpoint) as client:
+        await check_tools(client)
+
+        current = payload(await client.call_tool("kit_experiment_current", {}))
+        if current.get("active"):
+            active_id = current.get("experiment", {}).get("experiment_id")
+            raise SystemExit(
+                f"Experiment {active_id} is already active; finish it before running verification"
+            )
+
+        stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        started = payload(
+            await client.call_tool(
+                "kit_experiment_start",
+                {
+                    "title": f"Phase 2C persistence verification {stamp}",
+                    "objective": "Verify durable runtime MCP experiment recording.",
+                    "tags": ["phase-2c", "verification"],
+                },
+            )
+        )
+        experiment_id = started["experiment"]["experiment_id"]
+        print("experiment start: PASS")
+
+        payload(
+            await client.call_tool(
+                "kit_experiment_note",
+                {"note": "Live verifier started deterministic and Python checks."},
+            )
+        )
+        print("experiment note: PASS")
+
+        payload(await client.call_tool("kit_stage_summary", {}))
         print("kit_stage_summary: PASS")
 
-        setting = await client.call_tool(
-            "kit_setting_get",
-            {"path": "/renderer/multiGpu/enable"},
+        python_result = payload(
+            await client.call_tool("kit_execute_python", {"code": "2 + 2"})
         )
-        if setting.is_error:
-            raise SystemExit(f"kit_setting_get failed: {setting.content}")
-        print("kit_setting_get: PASS")
+        if not python_result.get("ok", False):
+            raise SystemExit(f"Harmless Python expression failed: {python_result}")
+        print("kit_execute_python: PASS")
 
-    print("KIT_LAB_RUNTIME_MCP_OK")
+        retrieved = payload(
+            await client.call_tool(
+                "kit_experiment_get",
+                {"experiment_id": experiment_id, "event_limit": 100},
+            )
+        )
+        verify_record_files(experiment_id, retrieved["events"])
+        print("events/results/source files: PASS")
+
+        payload(
+            await client.call_tool(
+                "kit_experiment_finish",
+                {
+                    "summary": "Phase 2C live persistence verification passed.",
+                    "outcome": "success",
+                },
+            )
+        )
+        completed = payload(
+            await client.call_tool(
+                "kit_experiment_get",
+                {"experiment_id": experiment_id, "event_limit": 100},
+            )
+        )
+        if completed["experiment"].get("status") != "finished":
+            raise SystemExit("Completed experiment was not retrievable as finished")
+        print("finish/retrieve: PASS")
+        print("experiment ID:", experiment_id)
+        print("POST_RESTART_COMMAND:")
+        print(f"./verify-user-local.sh --post-restart {experiment_id}")
+
+    print("KIT_LAB_PHASE2C_LIVE_OK")
+
+
+async def post_restart_verification(endpoint: str, experiment_id: str) -> None:
+    validate_experiment_id(experiment_id)
+    async with Client(endpoint) as client:
+        await check_tools(client)
+        retrieved = payload(
+            await client.call_tool(
+                "kit_experiment_get",
+                {"experiment_id": experiment_id, "event_limit": 100},
+            )
+        )
+        manifest = retrieved.get("experiment", {})
+        if manifest.get("experiment_id") != experiment_id:
+            raise SystemExit("Retrieved experiment ID did not match")
+        if manifest.get("status") != "finished":
+            raise SystemExit("Verification experiment is not finished")
+        verify_record_files(experiment_id, retrieved.get("events", []))
+        directory = experiment_directory(experiment_id)
+        if not (directory / "summary.md").is_file():
+            raise SystemExit("summary.md is missing after restart")
+    print("experiment ID:", experiment_id)
+    print("KIT_LAB_PHASE2C_POST_RESTART_OK")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--post-restart", metavar="EXPERIMENT_ID")
+    arguments = parser.parse_args()
+    endpoint = os.environ.get("KIT_LAB_MCP_ENDPOINT", "http://127.0.0.1:9910/mcp")
+    print("Endpoint:", endpoint)
+    if arguments.post_restart:
+        asyncio.run(post_restart_verification(endpoint, arguments.post_restart))
+    else:
+        asyncio.run(live_verification(endpoint))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
