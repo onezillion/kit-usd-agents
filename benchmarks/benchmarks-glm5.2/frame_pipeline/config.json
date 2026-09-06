@@ -1,0 +1,53 @@
+{
+  "job": "KHL-FRAME-PIPELINE-BENCH-01",
+  "stage": 1,
+  "scope_note": "Stage 1 only: capture -> prepare -> H.264 HW encode. NO Janus/RTP/WebRTC.",
+  "resolution": [1920, 1080],
+  "common_encoder_settings": {
+    "codec": "h264",
+    "profile_intent": "main",
+    "preset": "P1",
+    "tuning": "ultra_low_latency",
+    "rate_control": "cbr",
+    "bf": 0,
+    "lookahead": 0,
+    "aq": 0,
+    "temporalaq": 0,
+    "gop": "2*fps (documented; 60 at 30fps, 120 at 60fps)",
+    "idr_period": "2*fps (matches gop)",
+    "repeatspspps": 1,
+    "bitrate": {"30fps": 10000000, "60fps": 20000000}
+  },
+  "equivalence_mismatch": {
+    "b0_pyav":  {"profile": "main",   "evidence": "SPS profile_idc=0x4d (77=Main), level 4.0"},
+    "b1_pynv":  {"profile": "high",   "evidence": "PyNvVideoCodec 2.2.2 has no documented H.264 profile knob; SPS profile_idc=0x64 (100=High), level 4.0. Disclosed, not hidden."}
+  },
+  "test_matrix": {
+    "A_single": {
+      "resolutions": ["1920x1080"],
+      "fps": [30, 60],
+      "modes": ["static", "motion"],
+      "backends": ["b0_pyav", "b1_pynv_cpu", "b1_pynv_gpu"],
+      "repetitions": {"default": 1, "1080p30_motion": 2}
+    },
+    "B_multi": {
+      "1080p30": [1, 2, 4],
+      "1080p60": [1, 2],
+      "fan_modes": ["fanout", "independent"]
+    },
+    "C_live": {
+      "scene": "omniverse://140.110.27.92/NVIDIA/Demos/WarehousePhysics/Worlds/World_Demopack.usd",
+      "res_fps": [{"1080p30": [1, 2]}],
+      "capture_method": "kit ByteCapture (baseline) + B1-GPU live probe (capability-gated)"
+    }
+  },
+  "durations": {"warmup_s": 10, "measured_s": 30, "repetitions_important": 2, "soak": false},
+  "queue": {"policy": "replace_oldest", "maxsize_default": 2, "label": "freshness-preferring"},
+  "nvenc_semantics": {
+    "async_encode_supported": false,
+    "evidence": "PyNvVideoCodec GetEncoderCaps()['async_encode_support'] == 0 on this Blackwell config",
+    "rule": "Application queueing/scheduling measured SEPARATELY from hardware encode; never labelled async NVENC."
+  },
+  "results_dir_default": "$HOME/kit-ai/benchmarks/frame-pipeline/",
+  "results_dir_env": "FRAME_PIPELINE_RESULTS_DIR"
+}

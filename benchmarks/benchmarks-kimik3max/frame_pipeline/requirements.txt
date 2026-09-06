@@ -1,0 +1,11 @@
+# Benchmark environment (created with uv + CPython 3.12 from kit-ai venv).
+# Licenses: numpy BSD, av(Python) BSD-3 (links FFmpeg LGPL/GPL var),
+# PyNvVideoCodec NVIDIA proprietary (NVIDIA Omniverse/EULA), pynvml BSD-3,
+# cuda-python NVIDIA proprietary (CUDA Toolkit EULA), nvidia-cuda-nvrtc-cu12 NVIDIA.
+numpy==2.5.2
+av==18.1.0
+PyNvVideoCodec==2.2.2
+pynvml==13.0.1            # deprecated shim -> pulls nvidia-ml-py
+cuda-python==13.3.1       # pulls cuda-bindings/cuda-core/cuda-pathfinder
+nvidia-cuda-nvrtc-cu12==12.9.86
+pytest==9.1.1

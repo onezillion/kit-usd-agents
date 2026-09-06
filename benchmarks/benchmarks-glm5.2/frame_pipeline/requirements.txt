@@ -1,0 +1,11 @@
+# Python dependencies for the KHL Frame Pipeline Benchmark (Stage 1).
+# Install into a user-local venv; do NOT modify the global/system Python.
+#
+#   python3 -m venv /home/ubuntu/kit-ai/venvs/frame-pipeline-bench
+#   /home/ubuntu/kit-ai/venvs/frame-pipeline-bench/bin/python -m pip install -r requirements.txt
+#
+# Pinned to the versions actually validated during this benchmark (see env_probe.json).
+numpy<2.5
+av==18.1.0
+PyNvVideoCodec==2.2.2
+cuda-python<13

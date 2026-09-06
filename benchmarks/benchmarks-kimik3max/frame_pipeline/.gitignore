@@ -1,0 +1,7 @@
+# Generated benchmark artifacts must never be committed.
+__pycache__/
+*.pyc
+.pytest_cache/
+*.h264
+results/
+live_frames/
