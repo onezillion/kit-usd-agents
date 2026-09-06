@@ -1,8 +1,8 @@
 # KHL Kit Lab Runtime MCP
 
-Version 0.2.0 is the local runtime adapter for the persistent
-`omni.khl.kit_lab` extension. It preserves the original nine Kit runtime tools
-and adds six durable experiment-record tools.
+Version 0.3.0 is the local runtime adapter for the persistent
+`omni.khl.kit_lab` extension. It preserves the Phase 2C experiment layer and
+adds model-visible MCP policy metadata plus controlled live prim operations.
 
 The package contains no model, embedding, retrieval, reranking, hosted API,
 Kubernetes or LLM-provider logic. It does not depend on the Kit knowledge MCP.
@@ -15,9 +15,11 @@ Kubernetes or LLM-provider logic. It does not depend on the Kit knowledge MCP.
 - Remote Kit HTTP targets are rejected unless `KIT_LAB_ALLOW_REMOTE=true` is
   explicitly set. The MCP listener itself cannot be exposed remotely.
 - The caller cannot choose an arbitrary persistence root through an MCP tool.
-- No file read, copy, upload, delete, stage-save, Nucleus-save or Kit-restart
-  tool is exposed.
+- No local-file read/write/copy/upload/delete, stage-save, Nucleus-save or
+  Kit-restart tool is exposed.
 - No credentials are required.
+- Tool policy is advisory/model-visible in this phase. It does not replace the
+  loopback boundary or user/host authorization.
 
 ## Architecture
 
@@ -51,9 +53,39 @@ protects sequence allocation and persistence writes. Directories use mode
 Only one runtime MCP process may use a given experiment root. This lock is not
 an inter-process lock; do not run two servers against the same root.
 
+## MCP policy
+
+The server exposes one policy through four synchronized surfaces:
+
+- server-level MCP instructions;
+- exact descriptions, annotations, and `khl_policy` metadata on every tool;
+- the read-only `kit_lab_policy` tool;
+- [`MCP_POLICY.md`](MCP_POLICY.md), the repo-local human-readable manual.
+
+Policy fingerprint: `d11cf0a1f76fe715`
+
+Read-only inspection is allowed freely. Clear task intent authorizes
+deterministic live-stage creation/removal without repetitive confirmation. For
+tests or when the prompt does not choose a location, agents should prefer
+`/World/AgentSceneLab`, but the deterministic tools are not restricted to that
+path. Live mutation never authorizes save/export, arbitrary local files, or
+Nucleus writes.
+
+Before first use of `kit_execute_python`, an agent must ask unless general Kit
+Python was already authorized for the task/session. The required choices are
+allow once, allow for session, deny once, deny for session, or continue with a
+safer alternative. See `MCP_POLICY.md` for the exact semantics and mandatory
+restrictions.
+
+Tool annotations are hints rather than enforcement boundaries. The policy
+synchronization tests deliberately fail if a tool is added without updating its
+canonical policy metadata and manual.
+
 ## Tools
 
-The original nine tools retain their annotations and behavior:
+Read-only policy and inspection tools:
+
+- `kit_lab_policy`
 
 - `kit_lab_status`
 - `kit_runtime_info`
@@ -62,6 +94,14 @@ The original nine tools retain their annotations and behavior:
 - `kit_extensions_list`
 - `kit_setting_get`
 - `kit_viewport_info`
+
+Controlled live-stage mutation tools:
+
+- `kit_prim_create`
+- `kit_prim_remove`
+
+Elevated/runtime-control tools:
+
 - `kit_execute_python`
 - `kit_reset_python_session`
 
@@ -113,10 +153,13 @@ From a third terminal:
 source/mcp/khl_kit_lab_mcp/verify-user-local.sh
 ```
 
-The live verifier discovers exactly 15 tools, creates a clearly named Phase 2C
-verification experiment, adds a note, records stage inspection and `2 + 2`,
-checks event/result/source files, finishes the experiment and prints its ID.
-It deliberately retains that harmless experiment.
+The live verifier discovers exactly 18 tools; verifies server instructions,
+descriptions, annotations, and policy metadata; creates a uniquely named cube
+under `/World/AgentSceneLab`; independently inspects and removes it; and then
+runs the existing Phase 2C experiment-persistence check. Running the verifier
+is explicit authorization for its single harmless `2 + 2` Python execution.
+The verifier retains only the harmless finished experiment record, not the
+temporary cube.
 
 After restarting only the runtime MCP, use the printed ID:
 
@@ -139,9 +182,18 @@ source/mcp/khl_kit_lab_mcp/verify-user-local.sh --post-restart <experiment-id>
 
 `kit_execute_python` remains an unrestricted development escape hatch and is
 marked potentially destructive in its MCP annotations. Prefer deterministic
-tools. Its source is intentionally stored verbatim whenever an experiment is
-active. Never put credentials in submitted Python source, titles, objectives,
-tags, notes, summaries, arguments or generated output.
+tools and follow its once/session permission rules. Authorization does not
+permit stage save/export, arbitrary filesystem or Nucleus writes, repository
+mutation, external-package injection, blocking loops, or policy bypass. Its
+source is intentionally stored verbatim whenever an experiment is active.
+Never put credentials in submitted Python source, titles, objectives, tags,
+notes, summaries, arguments or generated output.
+
+`kit_prim_create` and `kit_prim_remove` use validated inputs and server-generated
+source against the existing Kit Python bridge. They can modify general live USD
+prim paths, but they never save/export the stage. Creation refuses to overwrite
+an existing prim and requires its parent to exist; removal refuses `/` and
+`/World`.
 
 Stored arguments and results are bounded and apply conservative key/pattern
 scrubbing. That scrubbing is defense in depth, not a perfect secret-redaction

@@ -80,7 +80,7 @@ class KitLabClient:
         body = None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "khl-kit-lab-mcp/0.2.0",
+            "User-Agent": "khl-kit-lab-mcp/0.3.0",
         }
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")

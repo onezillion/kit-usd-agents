@@ -25,11 +25,13 @@ fi
 PYTHONPATH="$script_dir/src${PYTHONPATH:+:$PYTHONPATH}" \
   "$venv/bin/python" - <<'PY'
 import mcp
+from importlib.metadata import version
 from mcp.server import MCPServer
 import khl_kit_lab_mcp
 
 print("MCP_IMPORT_OK")
 print("khl_kit_lab_mcp:", khl_kit_lab_mcp.__version__)
+print("mcp:", version("mcp"))
 print("python SDK import:", MCPServer.__name__)
 PY
 

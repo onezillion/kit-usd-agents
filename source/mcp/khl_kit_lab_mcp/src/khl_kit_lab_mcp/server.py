@@ -8,6 +8,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from . import __version__
 from .client import KitLabClient, KitLabClientError
 from .experiments import (
     MAX_EVENT_LIMIT,
@@ -25,30 +26,44 @@ from .experiments import (
     invoke_and_record,
     utc_now,
 )
+from .live_stage import (
+    MAX_PRIM_PATH_CHARS,
+    PRIM_PATH_PATTERN,
+    PrimType,
+    build_create_prim_source,
+    build_remove_prim_source,
+)
+from .policy import (
+    SERVER_INSTRUCTIONS,
+    policy_payload,
+    tool_annotations,
+    tool_description,
+    tool_meta,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
-DEVELOPMENT_EXECUTION = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=True,
-    idempotent_hint=False,
-    open_world_hint=False,
-)
-SESSION_MUTATION = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=False,
-    idempotent_hint=True,
-    open_world_hint=False,
-)
-EXPERIMENT_MUTATION = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=False,
-    idempotent_hint=False,
-    open_world_hint=False,
-)
 
-mcp = MCPServer("KHL Kit Lab Runtime")
+
+def _policy_annotations(tool_name: str) -> ToolAnnotations:
+    return ToolAnnotations(**tool_annotations(tool_name))
+
+
+def _tool_options(tool_name: str) -> dict[str, Any]:
+    return {
+        "description": tool_description(tool_name),
+        "annotations": _policy_annotations(tool_name),
+        "meta": tool_meta(tool_name),
+    }
+
+
+mcp = MCPServer(
+    "KHL Kit Lab Runtime",
+    title="KHL Kit Lab Runtime",
+    description="Controlled local MCP adapter for one persistent Omniverse Kit laboratory.",
+    instructions=SERVER_INSTRUCTIONS,
+    version=__version__,
+)
 client = KitLabClient()
 experiments = ExperimentStore()
 
@@ -63,10 +78,7 @@ def _tool_result(payload: dict[str, Any]) -> dict[str, Any]:
         message = error.get("message", "Kit Lab operation failed")
         raise ToolError(f"{code}: {message}")
 
-    raise ToolError(
-        "Kit Lab operation failed: "
-        + json.dumps(payload, ensure_ascii=False)[:4000]
-    )
+    raise ToolError("Kit Lab operation failed: " + json.dumps(payload, ensure_ascii=False)[:4000])
 
 
 def _experiment_error(exc: ExperimentError) -> ToolError:
@@ -118,6 +130,27 @@ async def _post(
     return await _recorded_call(tool_name, payload, operation)
 
 
+async def _controlled_python_post(
+    tool_name: str,
+    arguments: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    """Run server-generated, validated Kit Python as a deterministic MCP operation."""
+
+    async def operation() -> dict[str, Any]:
+        try:
+            return _tool_result(await client.post("/khl/lab/python/execute", {"code": source}))
+        except KitLabClientError as exc:
+            raise ToolError(str(exc)) from exc
+
+    return await _recorded_call(
+        tool_name,
+        arguments,
+        operation,
+        python_source=source,
+    )
+
+
 async def _runtime_snapshot() -> dict[str, Any]:
     snapshot: dict[str, Any] = {"captured_at": utc_now()}
     for key, path in (
@@ -138,25 +171,31 @@ def _experiment_result(operation: Any) -> dict[str, Any]:
         raise _experiment_error(exc) from exc
 
 
-@mcp.tool(title="Kit Lab status", annotations=READ_ONLY)
+@mcp.tool(title="Read Kit Lab policy", **_tool_options("kit_lab_policy"))
+async def kit_lab_policy() -> dict[str, Any]:
+    """Return the authoritative policy payload without contacting Kit."""
+    return policy_payload()
+
+
+@mcp.tool(title="Kit Lab status", **_tool_options("kit_lab_status"))
 async def kit_lab_status() -> dict[str, Any]:
     """Check whether the persistent local Kit laboratory is reachable and ready."""
     return await _get("kit_lab_status", "/khl/lab/status")
 
 
-@mcp.tool(title="Inspect Kit runtime", annotations=READ_ONLY)
+@mcp.tool(title="Inspect Kit runtime", **_tool_options("kit_runtime_info"))
 async def kit_runtime_info() -> dict[str, Any]:
     """Read Kit/app versions and active renderer or multi-GPU settings."""
     return await _get("kit_runtime_info", "/khl/lab/runtime/info")
 
 
-@mcp.tool(title="Summarize USD stage", annotations=READ_ONLY)
+@mcp.tool(title="Summarize USD stage", **_tool_options("kit_stage_summary"))
 async def kit_stage_summary() -> dict[str, Any]:
     """Read a bounded summary of the active USD stage without modifying it."""
     return await _get("kit_stage_summary", "/khl/lab/stage/summary")
 
 
-@mcp.tool(title="Inspect USD prim", annotations=READ_ONLY)
+@mcp.tool(title="Inspect USD prim", **_tool_options("kit_prim_inspect"))
 async def kit_prim_inspect(
     path: Annotated[str, Field(description="Absolute USD prim path, such as /World/Cube.")],
     include_attributes: bool = True,
@@ -176,7 +215,7 @@ async def kit_prim_inspect(
     )
 
 
-@mcp.tool(title="List Kit extensions", annotations=READ_ONLY)
+@mcp.tool(title="List Kit extensions", **_tool_options("kit_extensions_list"))
 async def kit_extensions_list(
     enabled_only: bool = False,
     search: str | None = None,
@@ -194,7 +233,7 @@ async def kit_extensions_list(
     )
 
 
-@mcp.tool(title="Read Kit setting", annotations=READ_ONLY)
+@mcp.tool(title="Read Kit setting", **_tool_options("kit_setting_get"))
 async def kit_setting_get(
     path: Annotated[
         str,
@@ -205,13 +244,65 @@ async def kit_setting_get(
     return await _post("kit_setting_get", "/khl/lab/settings/get", {"path": path})
 
 
-@mcp.tool(title="Inspect active viewport", annotations=READ_ONLY)
+@mcp.tool(title="Inspect active viewport", **_tool_options("kit_viewport_info"))
 async def kit_viewport_info() -> dict[str, Any]:
     """Read the active viewport's camera, resolution and render-product path."""
     return await _get("kit_viewport_info", "/khl/lab/viewport/info")
 
 
-@mcp.tool(title="Execute unrestricted Kit Python", annotations=DEVELOPMENT_EXECUTION)
+@mcp.tool(title="Create live USD prim", **_tool_options("kit_prim_create"))
+async def kit_prim_create(
+    path: Annotated[
+        str,
+        Field(
+            min_length=2,
+            max_length=MAX_PRIM_PATH_CHARS,
+            pattern=PRIM_PATH_PATTERN.pattern,
+            description=(
+                "Absolute live USD prim path. For tests or unspecified locations, prefer "
+                "/World/AgentSceneLab/<name>."
+            ),
+        ),
+    ],
+    prim_type: PrimType = "Xform",
+) -> dict[str, Any]:
+    """Create one new live prim using validated server-generated Kit Python."""
+    try:
+        source = build_create_prim_source(path, prim_type)
+    except ValueError as exc:
+        raise ToolError(f"INVALID_PRIM_REQUEST: {exc}") from exc
+    return await _controlled_python_post(
+        "kit_prim_create",
+        {"path": path, "prim_type": prim_type},
+        source,
+    )
+
+
+@mcp.tool(title="Remove live USD prim", **_tool_options("kit_prim_remove"))
+async def kit_prim_remove(
+    path: Annotated[
+        str,
+        Field(
+            min_length=2,
+            max_length=MAX_PRIM_PATH_CHARS,
+            pattern=PRIM_PATH_PATTERN.pattern,
+            description="Exact absolute path of the live prim subtree to remove.",
+        ),
+    ],
+) -> dict[str, Any]:
+    """Remove one exact live prim using validated server-generated Kit Python."""
+    try:
+        source = build_remove_prim_source(path)
+    except ValueError as exc:
+        raise ToolError(f"INVALID_PRIM_REQUEST: {exc}") from exc
+    return await _controlled_python_post(
+        "kit_prim_remove",
+        {"path": path},
+        source,
+    )
+
+
+@mcp.tool(title="Execute unrestricted Kit Python", **_tool_options("kit_execute_python"))
 async def kit_execute_python(
     code: Annotated[
         str,
@@ -227,10 +318,12 @@ async def kit_execute_python(
 ) -> dict[str, Any]:
     """Development escape hatch: execute unrestricted Python inside local Kit.
 
-    Prefer deterministic Kit Lab tools when they cover the task. This tool can
-    change the stage, settings, extensions, files, or process state and may hang
-    Kit. It must only target the local development laboratory.
+    Prefer deterministic Kit Lab tools when they cover the task. The runtime is
+    technically capable of broad effects, so the MCP policy forbids persistence,
+    external package injection, blocking loops, and policy bypass even after the
+    user authorizes Python. It must target only the local development laboratory.
     """
+
     async def operation() -> dict[str, Any]:
         try:
             # Python exceptions are experimental results, so return their captured
@@ -247,13 +340,13 @@ async def kit_execute_python(
     )
 
 
-@mcp.tool(title="Reset Kit Python session", annotations=SESSION_MUTATION)
+@mcp.tool(title="Reset Kit Python session", **_tool_options("kit_reset_python_session"))
 async def kit_reset_python_session() -> dict[str, Any]:
     """Clear variables retained by the Kit Lab persistent Python namespace."""
     return await _post("kit_reset_python_session", "/khl/lab/session/reset", {})
 
 
-@mcp.tool(title="Start Kit experiment", annotations=EXPERIMENT_MUTATION)
+@mcp.tool(title="Start Kit experiment", **_tool_options("kit_experiment_start"))
 async def kit_experiment_start(
     title: Annotated[str, Field(min_length=1, max_length=MAX_TITLE_CHARS)],
     objective: Annotated[str, Field(min_length=1, max_length=MAX_OBJECTIVE_CHARS)],
@@ -269,13 +362,13 @@ async def kit_experiment_start(
         raise _experiment_error(exc) from exc
 
 
-@mcp.tool(title="Get current Kit experiment", annotations=READ_ONLY)
+@mcp.tool(title="Get current Kit experiment", **_tool_options("kit_experiment_current"))
 async def kit_experiment_current() -> dict[str, Any]:
     """Return the active experiment, or a clean inactive result."""
     return _experiment_result(experiments.current)
 
 
-@mcp.tool(title="List Kit experiments", annotations=READ_ONLY)
+@mcp.tool(title="List Kit experiments", **_tool_options("kit_experiment_list"))
 async def kit_experiment_list(
     status: Literal["active", "finished"] | None = None,
     tag: Annotated[str | None, Field(max_length=MAX_TAG_CHARS)] = None,
@@ -288,7 +381,7 @@ async def kit_experiment_list(
     )
 
 
-@mcp.tool(title="Get Kit experiment", annotations=READ_ONLY)
+@mcp.tool(title="Get Kit experiment", **_tool_options("kit_experiment_get"))
 async def kit_experiment_get(
     experiment_id: Annotated[str, Field(min_length=1, max_length=96)],
     event_limit: Annotated[int, Field(ge=0, le=MAX_EVENT_LIMIT)] = 100,
@@ -297,7 +390,7 @@ async def kit_experiment_get(
     return _experiment_result(lambda: experiments.get(experiment_id, event_limit))
 
 
-@mcp.tool(title="Add Kit experiment note", annotations=EXPERIMENT_MUTATION)
+@mcp.tool(title="Add Kit experiment note", **_tool_options("kit_experiment_note"))
 async def kit_experiment_note(
     note: Annotated[str, Field(min_length=1, max_length=MAX_NOTE_CHARS)],
 ) -> dict[str, Any]:
@@ -305,7 +398,7 @@ async def kit_experiment_note(
     return _experiment_result(lambda: experiments.note(note))
 
 
-@mcp.tool(title="Finish Kit experiment", annotations=EXPERIMENT_MUTATION)
+@mcp.tool(title="Finish Kit experiment", **_tool_options("kit_experiment_finish"))
 async def kit_experiment_finish(
     summary: Annotated[str, Field(min_length=1, max_length=MAX_SUMMARY_CHARS)],
     outcome: Literal["success", "failed", "inconclusive", "cancelled"],

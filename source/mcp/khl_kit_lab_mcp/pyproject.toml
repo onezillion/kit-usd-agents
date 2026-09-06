@@ -1,6 +1,6 @@
 [project]
 name = "khl-kit-lab-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local MCP adapter for the KHL Omniverse Kit laboratory."
 requires-python = ">=3.12,<3.13"
 dependencies = [
