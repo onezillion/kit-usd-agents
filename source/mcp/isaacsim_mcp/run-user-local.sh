@@ -13,25 +13,22 @@ if [ -f "$env_file" ]; then
     set +a
 fi
 
-if [ -z "${NVIDIA_API_KEY:-}" ]; then
-    echo "WARNING: NVIDIA_API_KEY is not set; cloud-backed Kit searches may fail." >&2
-fi
-
-command_path="$venv/bin/kit-mcp"
+command_path="$venv/bin/isaacsim-mcp"
 if [ ! -x "$command_path" ]; then
-    printf 'ERROR: NVIDIA Kit MCP is not installed in %s; run setup-mcps-user-local.sh.\n' "$venv" >&2
+    printf 'ERROR: Isaac Sim MCP is not installed in %s; run setup-mcps-user-local.sh.\n' "$venv" >&2
     exit 69
 fi
 
 export VIRTUAL_ENV="$venv"
 export PATH="$venv/bin:/home/ubuntu/.local/bin:/usr/bin:/bin"
-export XDG_CACHE_HOME="$state_root/cache/kit-usd-mcps/kit"
-export TMPDIR="$state_root/tmp/kit-usd-mcps/kit"
+export XDG_CACHE_HOME="$state_root/cache/kit-usd-mcps/isaacsim"
+export TMPDIR="$state_root/tmp/kit-usd-mcps/isaacsim"
 export MCP_HOST="127.0.0.1"
-export MCP_PORT="9902"
+export MCP_PORT="9904"
+export ISAACSIM_MCP_DISABLE_USAGE_LOGGING="true"
 export KIT_MCP_DISABLE_USAGE_LOGGING="true"
 export PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring"
 
 mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
 cd "$script_dir"
-exec "$command_path" workflows/local_config.yaml
+exec "$command_path" workflows/config.yaml

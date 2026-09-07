@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "policy_version": "1.0",
+  "services": [
+    {
+      "id": "omni-ui",
+      "display_name": "OmniUI MCP",
+      "port": 9901,
+      "endpoint": "http://127.0.0.1:9901/mcp",
+      "wrapper": "source/mcp/omni_ui_mcp/run-user-local.sh",
+      "environment": "nvidia-shared",
+      "package": "omni-ui-aiq",
+      "expected_version": "1.0.0",
+      "policy_class": "READ_ONLY_KNOWLEDGE",
+      "upstream_metadata": "not-declared",
+      "tools": [
+        "search_ui_code_examples",
+        "search_ui_window_examples",
+        "list_ui_classes",
+        "list_ui_modules",
+        "get_ui_class_detail",
+        "get_ui_module_detail",
+        "get_ui_method_detail",
+        "get_ui_instructions",
+        "get_ui_class_instructions",
+        "get_ui_style_docs"
+      ],
+      "read_only_call": {
+        "tool": "list_ui_modules",
+        "arguments": {}
+      },
+      "semantic_call": {
+        "tool": "search_ui_code_examples",
+        "arguments": {"query": "create a button and label"}
+      }
+    },
+    {
+      "id": "kit",
+      "display_name": "NVIDIA Kit MCP",
+      "port": 9902,
+      "endpoint": "http://127.0.0.1:9902/mcp",
+      "wrapper": "source/mcp/kit_mcp/run-user-local.sh",
+      "environment": "nvidia-shared",
+      "package": "kit-mcp",
+      "expected_version": "1.0.0",
+      "policy_class": "READ_ONLY_KNOWLEDGE",
+      "upstream_metadata": "not-declared",
+      "tools": [
+        "get_kit_instructions",
+        "search_kit_extensions",
+        "get_kit_extension_details",
+        "get_kit_extension_dependencies",
+        "get_kit_extension_apis",
+        "get_kit_api_details",
+        "search_kit_code_examples",
+        "search_kit_test_examples",
+        "search_kit_settings",
+        "search_kit_app_templates",
+        "get_kit_app_template_details",
+        "search_kit_knowledge"
+      ],
+      "read_only_call": {
+        "tool": "get_kit_instructions",
+        "arguments": {"instruction_sets": "kit_system"}
+      },
+      "semantic_call": {
+        "tool": "search_kit_knowledge",
+        "arguments": {"request": "extension lifecycle"}
+      }
+    },
+    {
+      "id": "usd-code",
+      "display_name": "USD Code MCP",
+      "port": 9903,
+      "endpoint": "http://127.0.0.1:9903/mcp",
+      "wrapper": "source/mcp/usd_code_mcp/run-user-local.sh",
+      "environment": "nvidia-shared",
+      "package": "usd-code-mcp",
+      "expected_version": "1.0.0",
+      "policy_class": "READ_ONLY_KNOWLEDGE",
+      "upstream_metadata": "not-declared",
+      "tools": [
+        "search_usd_code_examples",
+        "search_usd_knowledge",
+        "list_usd_modules",
+        "list_usd_classes",
+        "get_usd_module_detail",
+        "get_usd_class_detail",
+        "get_usd_method_detail"
+      ],
+      "read_only_call": {
+        "tool": "list_usd_modules",
+        "arguments": {}
+      },
+      "semantic_call": {
+        "tool": "search_usd_knowledge",
+        "arguments": {"request": "USD layer composition"}
+      }
+    },
+    {
+      "id": "isaacsim",
+      "display_name": "Isaac Sim MCP",
+      "port": 9904,
+      "endpoint": "http://127.0.0.1:9904/mcp",
+      "wrapper": "source/mcp/isaacsim_mcp/run-user-local.sh",
+      "environment": "nvidia-shared",
+      "package": "isaacsim-mcp",
+      "expected_version": "2.0.0",
+      "policy_class": "READ_ONLY_KNOWLEDGE",
+      "upstream_metadata": "not-declared",
+      "tools": [
+        "get_isaac_sim_instructions",
+        "search_isaac_sim_extensions",
+        "get_isaac_sim_extension_details",
+        "search_isaac_sim_code_examples",
+        "search_isaac_sim_settings"
+      ],
+      "read_only_call": {
+        "tool": "get_isaac_sim_instructions",
+        "arguments": {"instruction_sets": "what_is_isaac_sim"}
+      },
+      "semantic_call": {
+        "tool": "search_isaac_sim_code_examples",
+        "arguments": {"query": "create a camera", "top_k": 3}
+      }
+    },
+    {
+      "id": "kit-lab",
+      "display_name": "KHL Kit Lab MCP",
+      "port": 9910,
+      "endpoint": "http://127.0.0.1:9910/mcp",
+      "wrapper": "source/mcp/khl_kit_lab_mcp/run-user-local.sh",
+      "environment": "kit-lab",
+      "package": "khl-kit-lab-mcp",
+      "expected_version": "0.3.0",
+      "policy_class": "MIXED_KIT_LAB_POLICY",
+      "upstream_metadata": "declared-and-required",
+      "tools": [
+        "kit_lab_policy",
+        "kit_lab_status",
+        "kit_runtime_info",
+        "kit_stage_summary",
+        "kit_prim_inspect",
+        "kit_extensions_list",
+        "kit_setting_get",
+        "kit_viewport_info",
+        "kit_prim_create",
+        "kit_prim_remove",
+        "kit_execute_python",
+        "kit_reset_python_session",
+        "kit_experiment_start",
+        "kit_experiment_current",
+        "kit_experiment_list",
+        "kit_experiment_get",
+        "kit_experiment_note",
+        "kit_experiment_finish"
+      ],
+      "read_only_call": {
+        "tool": "kit_lab_status",
+        "arguments": {}
+      }
+    }
+  ]
+}

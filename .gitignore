@@ -23,3 +23,6 @@ source/modules/rags/rag_nodes/build/lib/**
 
 __pycache__/
 *.py[cod]
+
+# User-local MCP credentials and runtime state never belong in Git.
+/source/mcp/.env

@@ -262,6 +262,17 @@ KIT_LOCAL_RERANKER_URL=http://localhost:8081
 
 ---
 
+## Repository user-local service
+
+For durable loopback deployment, use the repository-root
+[`setup-mcps-user-local.sh`](../../../setup-mcps-user-local.sh) and
+[`manage-mcps-user-local.sh`](../../../manage-mcps-user-local.sh). The local
+wrapper in this directory uses the shared NVIDIA venv and upstream production
+config, binds port 9904 only to `127.0.0.1`, exports both documented and
+implementation-observed analytics controls, and stores runtime files outside
+Git. The upstream `run.sh` below remains the Poetry-oriented development
+launcher.
+
 ## Development
 
 ### Running Locally (Without Docker)

@@ -1,5 +1,9 @@
 # Kit USD Agents
 
+For the repository-owned loopback MCP stack, see
+[User-local MCP stack](MCP_USER_LOCAL.md). It provides explicit setup and a
+single manager for OmniUI, Kit, USD Code, Isaac Sim, and KHL Kit Lab MCP.
+
 AI-powered development tools for NVIDIA Omniverse, including Chat USD and Model Context Protocol (MCP) servers for Kit, USD, OmniUI, and Isaac Sim development.
 
 ## What's Included
