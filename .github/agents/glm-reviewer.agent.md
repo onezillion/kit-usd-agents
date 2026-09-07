@@ -12,10 +12,13 @@ tools:
   - web
   - kit-dev-mcp/*
 
+  - kit-lab-runtime/kit_lab_policy
   - kit-lab-runtime/kit_lab_status
   - kit-lab-runtime/kit_runtime_info
   - kit-lab-runtime/kit_stage_summary
   - kit-lab-runtime/kit_prim_inspect
+  - kit-lab-runtime/kit_extensions_list
+  - kit-lab-runtime/kit_setting_get
   - kit-lab-runtime/kit_viewport_info
   - kit-lab-runtime/kit_experiment_current
   - kit-lab-runtime/kit_experiment_get

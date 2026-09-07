@@ -51,7 +51,8 @@ Use the available tools according to the task:
 - use VS Code tools when editor/workspace operations are more appropriate than shell commands;
 - use todos for multi-step work when tracking progress improves reliability;
 - use terminal execution for builds, tests, diagnostics, and repository operations;
-- use Kit MCP tools for live Kit inspection and controlled runtime work.
+- use `kit-dev-mcp/*` only for NVIDIA Kit documentation and knowledge retrieval;
+- use `kit-lab-runtime/*` for live Kit inspection, controlled mutation, authorized Python, and experiments, following its own policy.
 
 ## Live Kit safety
 
