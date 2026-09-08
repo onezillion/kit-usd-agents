@@ -9,7 +9,7 @@ only process groups it started and records its state outside Git.
 | NVIDIA Kit MCP | `127.0.0.1:9902/mcp` | shared NVIDIA | 12 | read-only knowledge/retrieval |
 | USD Code MCP | `127.0.0.1:9903/mcp` | shared NVIDIA | 7 | read-only knowledge/retrieval |
 | Isaac Sim MCP | `127.0.0.1:9904/mcp` | shared NVIDIA | 5 | read-only knowledge/retrieval |
-| KHL Kit Lab MCP | `127.0.0.1:9910/mcp` | separate Kit Lab | 18 | mixed, governed by its own policy |
+| KHL Kit Lab MCP | `127.0.0.1:9910/mcp` | separate Kit Lab | 20 | mixed, governed by its own policy |
 
 The default shared environment is `/home/ubuntu/kit-ai/venvs/kit-usd-mcp`.
 Set `KIT_USD_MCP_VENV` or pass `--venv ABSOLUTE_PATH` to override it. Kit Lab
@@ -55,8 +55,8 @@ is a convenience delegate to the explicit setup script.
 description and input schema, checks annotation/`_meta` policy, and runs one
 deterministic read-only call. Add `--semantic` to test the configured embedder
 and reranker paths. Add `--full-kit-lab` only when a mutating Kit Lab verification
-is intended: that existing verifier creates a durable experiment and briefly
-creates, inspects, and removes a temporary prim.
+is intended: that verifier creates a durable experiment and executes Kit Python
+(`2 + 2`). The standalone Kit Lab verifier is read-only unless `--full` is supplied.
 
 ## Credentials, external dependencies, and logs
 
@@ -142,12 +142,8 @@ KHL Kit Lab MCP:
 - `kit_lab_status`
 - `kit_runtime_info`
 - `kit_stage_summary`
-- `kit_prim_inspect`
 - `kit_extensions_list`
-- `kit_setting_get`
 - `kit_viewport_info`
-- `kit_prim_create`
-- `kit_prim_remove`
 - `kit_execute_python`
 - `kit_reset_python_session`
 - `kit_experiment_start`
@@ -156,6 +152,17 @@ KHL Kit Lab MCP:
 - `kit_experiment_get`
 - `kit_experiment_note`
 - `kit_experiment_finish`
+- `kit_lifecycle_config`
+- `kit_status`
+- `kit_start`
+- `kit_stop`
+- `kit_restart`
+- `kit_log_paths`
+
+Kit Lab 0.5.0 develops and debugs reusable installed-version Kit/USD Python. Its
+stage summary skips full prim traversal unless `include_statistics=true`; uncomputed
+counts are null. Bridge API 0.3.0 or newer must be activated separately for the new POST summary
+contract. The NVIDIA knowledge services and their inventories are unchanged.
 
 Kit Lab annotations, descriptions, `_meta`, and server instructions must match
 `source/mcp/khl_kit_lab_mcp/MCP_POLICY.md` and its canonical Python policy.
@@ -183,3 +190,16 @@ Stop sends `TERM` only to a token-validated manager-owned process group, waits
 15 seconds by default, then revalidates ownership before `KILL`. Startup waits
 90 seconds by default. If a later start fails, only services newly started by
 that same invocation are rolled back; previously healthy services are preserved.
+
+### Kit Lab lifecycle (Stage C+D)
+
+Kit Lab alone adds six tools: `kit_lifecycle_config`, `kit_status`, `kit_start`,
+`kit_stop`, `kit_restart`, and `kit_log_paths`. Configure once with
+`source/mcp/khl_kit_lab_mcp/lifecycle-user-local.sh setup`; machine configuration
+lives at `~/kit-ai/lab/lifecycle.json`, outside Git. Bridge API 0.4.0 exposes
+process identity and readiness. Kit and MCP can start in either order.
+
+The fixed `KHL_KIT_ID=nchc-kit-dev-main` must be exported by manual launches too.
+Lifecycle stop/restart operates on the currently identified process, with explicit
+force opt-in and no PID registry. Native log discovery returns paths only. See the
+[Kit Lab README](source/mcp/khl_kit_lab_mcp/README.md) for contracts and timeout policy.

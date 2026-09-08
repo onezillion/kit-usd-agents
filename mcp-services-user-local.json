@@ -132,7 +132,7 @@
       "wrapper": "source/mcp/khl_kit_lab_mcp/run-user-local.sh",
       "environment": "kit-lab",
       "package": "khl-kit-lab-mcp",
-      "expected_version": "0.3.0",
+      "expected_version": "0.5.0",
       "policy_class": "MIXED_KIT_LAB_POLICY",
       "upstream_metadata": "declared-and-required",
       "tools": [
@@ -140,12 +140,8 @@
         "kit_lab_status",
         "kit_runtime_info",
         "kit_stage_summary",
-        "kit_prim_inspect",
         "kit_extensions_list",
-        "kit_setting_get",
         "kit_viewport_info",
-        "kit_prim_create",
-        "kit_prim_remove",
         "kit_execute_python",
         "kit_reset_python_session",
         "kit_experiment_start",
@@ -153,7 +149,13 @@
         "kit_experiment_list",
         "kit_experiment_get",
         "kit_experiment_note",
-        "kit_experiment_finish"
+        "kit_experiment_finish",
+        "kit_lifecycle_config",
+        "kit_status",
+        "kit_start",
+        "kit_stop",
+        "kit_restart",
+        "kit_log_paths"
       ],
       "read_only_call": {
         "tool": "kit_lab_status",

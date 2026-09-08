@@ -1,8 +1,10 @@
 # KHL Kit Lab MCP Policy
 
-Policy version: **1.0**  
-Policy fingerprint: **d11cf0a1f76fe715**  
-MCP package version: **0.3.0**
+Policy version: **2.1**
+
+Policy fingerprint: **09469759cd1b6289**
+
+MCP package version: **0.5.0**
 
 This document describes the model-visible advisory policy for the local KHL Kit Lab
 runtime MCP. The canonical machine-readable entries live in
@@ -10,13 +12,16 @@ runtime MCP. The canonical machine-readable entries live in
 
 Tool annotations are accurate hints, not authorization or security boundaries. The MCP
 listener remains loopback-only. The server exposes no stage-save/export, arbitrary file
-write, Nucleus mutation, Kit restart, or external destructive operation.
+write, Nucleus mutation, or arbitrary process control. Scoped Kit lifecycle operations
+require runtime-control authorization and can lose unsaved state.
 
 ## Core behavior
 
 - `READ_ONLY`: allow when relevant; no permission prompt is needed.
-- `LIVE_MUTATION`: a clear request to build/change/remove live scene state is sufficient
-  authorization. Do not ask before every deterministic operation.
+- Develop, execute, observe, and debug reusable installed-version Kit/USD Python.
+  Use Python for scene, attribute, and settings investigation as needed.
+  Success through a scene shortcut does not validate a standalone source deliverable.
+- Arbitrary Python remains `ELEVATED_EXECUTION` even for inspection.
 - For a test or when the user did not choose a location, prefer
   `/World/AgentSceneLab` as a playground. This is guidance, not a path restriction.
 - Live mutation never authorizes save/export, local filesystem persistence, or Nucleus
@@ -28,11 +33,11 @@ write, Nucleus mutation, Kit restart, or external destructive operation.
   to run or record an experiment. Infrastructure-managed experiment files do not grant
   general filesystem permission.
 - `PERSISTENT_WRITE` and `DESTRUCTIVE_EXTERNAL`: deny by default. No such tool is exposed
-  in version 0.3.0.
+  in version 0.5.0. Scoped lifecycle operations are RUNTIME_CONTROL.
 
 ## General Kit Python permission
 
-Before first use, offer:
+If general Kit Python has not already been authorized for this task/session, before first use offer:
 
 1. Allow once
 2. Allow for this session
@@ -41,8 +46,8 @@ Before first use, offer:
 5. Continue without Kit Python / use a safer alternative
 
 Allow-once covers one execution. Allow-for-session covers later Python calls in the same
-agent/chat session. Deny-once skips only the current call. Deny-for-session means do not
-ask again during the session. A material change in circumstances may justify asking again
+agent/chat session within the authorized scope, without repeated prompts. Deny-once
+skips only the current call. Deny-for-session means do not ask again during the session. A material change in circumstances may justify asking again
 only after a deny-once.
 
 Authorization never permits Python to:
@@ -66,14 +71,10 @@ submitted Kit Python—owns those bounded writes.
 | `kit_lab_policy` | READ_ONLY | None | Allow | Relevant inspection intent; no alternative needed | read-only, idempotent, closed-world |
 | `kit_lab_status` | READ_ONLY | Loopback status read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
 | `kit_runtime_info` | READ_ONLY | Loopback runtime read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
-| `kit_stage_summary` | READ_ONLY | Bounded stage inspection; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
-| `kit_prim_inspect` | READ_ONLY | Bounded prim inspection; none | Allow | Use `kit_stage_summary` for a narrower overview | read-only, idempotent, closed-world |
+| `kit_stage_summary` | READ_ONLY | Lightweight context; opt-in full traversal; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
 | `kit_extensions_list` | READ_ONLY | Extension metadata read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
-| `kit_setting_get` | READ_ONLY | Carb setting read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
 | `kit_viewport_info` | READ_ONLY | Viewport metadata read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
-| `kit_prim_create` | LIVE_MUTATION | Creates one new live prim; live stage/session only | Allow with clear build/change intent | Refuses existing prim; otherwise inspect first | mutating, non-destructive, non-idempotent, closed-world |
-| `kit_prim_remove` | LIVE_MUTATION | Removes one exact live prim subtree; live stage/session only | Allow with clear removal/cleanup intent | Inspect exact prim first when uncertain | mutating, destructive, idempotent, closed-world |
-| `kit_execute_python` | ELEVATED_EXECUTION | Arbitrary code in persistent Kit interpreter; session plus experiment evidence | Ask before first use | Use a deterministic tool when sufficient | mutating, potentially destructive, non-idempotent, closed-world |
+| `kit_execute_python` | ELEVATED_EXECUTION | Arbitrary code in persistent Kit interpreter; session plus experiment evidence | Ask before first use | Use retained context tools or installed source/docs when sufficient | mutating, potentially destructive, non-idempotent, closed-world |
 | `kit_reset_python_session` | RUNTIME_CONTROL | Clears retained Python namespace; Kit session | Ask unless clearly requested | Avoid reset if inspection is sufficient | mutating, destructive, idempotent, closed-world |
 | `kit_experiment_start` | EXPERIMENT_CONTROL | Creates active experiment record; local experiment disk | Allow for explicit experiment | Check `kit_experiment_current` first | mutating, non-destructive, non-idempotent, closed-world |
 | `kit_experiment_current` | READ_ONLY | Reads current record; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
@@ -82,19 +83,33 @@ submitted Kit Python—owns those bounded writes.
 | `kit_experiment_note` | EXPERIMENT_CONTROL | Appends bounded note; local experiment disk | Allow for explicit experiment | Check current experiment if uncertain | mutating, non-destructive, non-idempotent, closed-world |
 | `kit_experiment_finish` | EXPERIMENT_CONTROL | Finishes record and writes summary; local experiment disk | Allow for explicit experiment | Check current experiment if uncertain | mutating, non-destructive, non-idempotent, closed-world |
 
-## Controlled live prim operations
+| `kit_lifecycle_config` | READ_ONLY | Read approved configuration and process-inspection diagnostics | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
+| `kit_status` | READ_ONLY | Rediscover OS identity and probe matching bridge | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
+| `kit_start` | RUNTIME_CONTROL | Launch approved Kit; Kit runtime files and captured output | Ask unless authorized | Clear start intent; safer alternative: status | mutating, non-destructive, idempotent, closed-world |
+| `kit_stop` | RUNTIME_CONTROL | Signal identified Kit; unsaved state may be lost | Ask unless authorized | Clear stop intent; forced kill requires explicit authorization | mutating, destructive, idempotent, closed-world |
+| `kit_restart` | RUNTIME_CONTROL | Confirm exit then relaunch with stable identity | Ask unless authorized | Clear restart intent; forced kill requires explicit authorization | mutating, destructive, non-idempotent, closed-world |
+| `kit_log_paths` | READ_ONLY | Read path setting/descriptor links, no file contents | Allow | Relevant inspection intent; content access needs separate task/session consent | read-only, idempotent, closed-world |
 
-`kit_prim_create` and `kit_prim_remove` call the existing Kit Python HTTP endpoint with
-server-generated source. The agent cannot supply source through these tools. Inputs are
-limited to validated absolute USD prim paths and an enumerated schema type. They do not
-call save/export or filesystem/Nucleus APIs.
+## Stage summary and Python state
 
-Creation supports `Xform`, `Scope`, `Cube`, `Sphere`, `Cylinder`, `Cone`, `Capsule`,
-`Camera`, `DistantLight`, `SphereLight`, `RectLight`, and `DiskLight`. It requires the
-parent prim to exist and refuses to overwrite an existing prim. This prevents one request
-from silently authoring an unspecified ancestor hierarchy. Removal refuses `/` and
-`/World`; otherwise it operates on the exact requested live prim subtree and reports a
-missing prim as a no-op.
+`kit_stage_summary(include_statistics=false)` reads stage layers, default prim,
+units, timing, and at most 256 root-child paths, with `root_children_truncated`.
+It does not traverse prims by default: `statistics_computed=false`, `prim_count=null`,
+and `type_counts=null`, including when no stage exists. With `include_statistics=true`,
+counts use a full `Usd.Stage.Traverse()` with its default predicate (not `TraverseAll`).
+This traversal may be expensive and is not bounded. Counts are accumulated without
+retaining every prim. An empty traversed stage has a computed count of zero.
+
+MCP uses the bridge's typed POST summary route. An old loaded bridge rejects this
+request instead of silently performing its former expensive GET. Activate bridge API
+0.3.0 or newer before checking live summary behavior; source edits alone do not reload Kit.
+The compatibility GET now accepts the same optional `include_statistics` boolean.
+
+The Python executor preserves its namespace, top-level await, last-expression result,
+stdout/stderr/traceback capture, and experiment source recording. Namespace reset is
+not a Kit restart, task cancellation, module unload, or full cleanup. A client timeout
+does not prove in-Kit execution stopped. Preserve unrelated active experiments and
+historical records, including events naming retired tools.
 
 ## Maintenance rule
 
@@ -113,3 +128,23 @@ descriptions/annotations/metadata differ from the canonical policy, or when this
 does not name every registered tool. It also verifies the policy fingerprint in this
 manual and README, so any policy/tool-description change requires both documents to be
 reviewed and refreshed.
+
+## Lifecycle and log-path scope
+
+The only managed identity is `nchc-kit-dev-main`. Each call rediscovers the exact
+configured Kit executable and its `KHL_KIT_ID` environment entry. There is no saved
+PID or parent/child ownership requirement. Duplicate matches and unreadable candidates
+prevent control. A pidfd and fresh executable/environment/start-time validation protect
+signals against PID reuse. Host permissions remain necessary.
+
+Graceful stop waits 30 seconds by default. Only explicitly authorized `force=true`
+allows SIGKILL, followed by at most 5 seconds of waiting. Restart does not launch after
+failed shutdown. Start waits 180 seconds by default (override up to 3600) and preserves
+a process that is alive but not ready. Lifecycle configuration and captured launch output
+are bounded infrastructure persistence, not permission for arbitrary filesystem writes.
+
+`kit_log_paths` associates `/log/file` with matching OS identity, PID and start time;
+open descriptors provide a fallback within configured roots. No newest-mtime selection
+or log-content read occurs. Reading returned files through normal tools still requires
+separate task/session native-log consent and host access. Lifecycle calls do not append
+experiment events; existing runtime/experiment recording remains unchanged.

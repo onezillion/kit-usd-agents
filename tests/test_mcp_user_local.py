@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import importlib.util
 import re
 import subprocess
 import sys
@@ -32,7 +33,7 @@ OFFICIAL_CONFIG = {
     ],
     "isaacsim": [ROOT / "source/mcp/isaacsim_mcp/workflows/config.yaml"],
 }
-EXPECTED_COUNTS = {"omni-ui": 10, "kit": 12, "usd-code": 7, "isaacsim": 5, "kit-lab": 18}
+EXPECTED_COUNTS = {"omni-ui": 10, "kit": 12, "usd-code": 7, "isaacsim": 5, "kit-lab": 20}
 
 
 def main_tool_names(path: Path) -> list[str]:
@@ -86,6 +87,33 @@ class InventoryTests(unittest.TestCase):
         server = (ROOT / "source/mcp/khl_kit_lab_mcp/src/khl_kit_lab_mcp/server.py").read_text(encoding="utf-8")
         names = re.findall(r'@mcp\.tool\([^\n]+_tool_options\("([a-z0-9_]+)"\)', server)
         self.assertEqual(names, SERVICES["kit-lab"]["tools"])
+
+    def test_kit_lab_versions_docs_verifier_and_reviewer_match(self) -> None:
+        package = ROOT / "source/mcp/khl_kit_lab_mcp"
+        expected = set(SERVICES["kit-lab"]["tools"])
+        verifier = ast.parse((package / "verify.py").read_text())
+        inventory = next(n.value for n in verifier.body
+                         if isinstance(n, ast.Assign)
+                         and any(isinstance(t, ast.Name) and t.id == "EXPECTED_TOOLS"
+                                 for t in n.targets))
+        self.assertEqual(ast.literal_eval(inventory), expected)
+        for path in (ROOT / "MCP_USER_LOCAL.md", package / "README.md"):
+            names = set(re.findall(r"^- `(kit_[a-z_]+)`$", path.read_text(), re.MULTILINE))
+            self.assertEqual(names, expected, path)
+        for path in (package / "pyproject.toml", package / "src/khl_kit_lab_mcp/__init__.py"):
+            self.assertIn(f'"{SERVICES["kit-lab"]["expected_version"]}"', path.read_text())
+        spec = importlib.util.spec_from_file_location(
+            "kit_lab_policy_for_sync", package / "src/khl_kit_lab_mcp/policy.py")
+        policy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(policy)
+        reviewer = (ROOT / ".github/agents/glm-reviewer.agent.md").read_text()
+        allowlist = re.findall(r"^  - kit-lab-runtime/(.+)$", reviewer, re.MULTILINE)
+        self.assertTrue(allowlist)
+        for name in allowlist:
+            self.assertIn(name, expected)
+            self.assertEqual(policy.TOOL_POLICIES[name]["class"], "READ_ONLY")
+        self.assertIn("  - kit-dev-mcp/*", reviewer)
+        self.assertIn("model: GLM 5.2", reviewer)
 
     def test_wrappers_are_local_only_and_disable_usage_logging(self) -> None:
         for service in SERVICES.values():

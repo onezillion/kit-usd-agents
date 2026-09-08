@@ -4,12 +4,14 @@ import os
 from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import __version__
 from .client import KitLabClient, KitLabClientError
+from .lifecycle import KIT_ID, KitLifecycle, LifecycleError, load_config
 from .experiments import (
     MAX_EVENT_LIMIT,
     MAX_LIST_LIMIT,
@@ -25,13 +27,6 @@ from .experiments import (
     ExperimentStore,
     invoke_and_record,
     utc_now,
-)
-from .live_stage import (
-    MAX_PRIM_PATH_CHARS,
-    PRIM_PATH_PATTERN,
-    PrimType,
-    build_create_prim_source,
-    build_remove_prim_source,
 )
 from .policy import (
     SERVER_INSTRUCTIONS,
@@ -66,6 +61,24 @@ mcp = MCPServer(
 )
 client = KitLabClient()
 experiments = ExperimentStore()
+_lifecycle_instance: KitLifecycle | None = None
+
+
+def _lifecycle() -> KitLifecycle:
+    global _lifecycle_instance
+    config = load_config()
+    if _lifecycle_instance is None or _lifecycle_instance.config != config:
+        _lifecycle_instance = KitLifecycle(config)
+    return _lifecycle_instance
+
+
+async def _lifecycle_operation(operation, kit_id: str):
+    if kit_id != KIT_ID:
+        raise ToolError(f"UNKNOWN_KIT_ID: Only {KIT_ID} is configured")
+    try:
+        return await operation(_lifecycle())
+    except (LifecycleError, OSError) as exc:
+        raise ToolError(f"{getattr(exc, 'code', 'OS_ERROR')}: {exc}") from exc
 
 
 def _tool_result(payload: dict[str, Any]) -> dict[str, Any]:
@@ -130,27 +143,6 @@ async def _post(
     return await _recorded_call(tool_name, payload, operation)
 
 
-async def _controlled_python_post(
-    tool_name: str,
-    arguments: dict[str, Any],
-    source: str,
-) -> dict[str, Any]:
-    """Run server-generated, validated Kit Python as a deterministic MCP operation."""
-
-    async def operation() -> dict[str, Any]:
-        try:
-            return _tool_result(await client.post("/khl/lab/python/execute", {"code": source}))
-        except KitLabClientError as exc:
-            raise ToolError(str(exc)) from exc
-
-    return await _recorded_call(
-        tool_name,
-        arguments,
-        operation,
-        python_source=source,
-    )
-
-
 async def _runtime_snapshot() -> dict[str, Any]:
     snapshot: dict[str, Any] = {"captured_at": utc_now()}
     for key, path in (
@@ -190,28 +182,16 @@ async def kit_runtime_info() -> dict[str, Any]:
 
 
 @mcp.tool(title="Summarize USD stage", **_tool_options("kit_stage_summary"))
-async def kit_stage_summary() -> dict[str, Any]:
-    """Read a bounded summary of the active USD stage without modifying it."""
-    return await _get("kit_stage_summary", "/khl/lab/stage/summary")
-
-
-@mcp.tool(title="Inspect USD prim", **_tool_options("kit_prim_inspect"))
-async def kit_prim_inspect(
-    path: Annotated[str, Field(description="Absolute USD prim path, such as /World/Cube.")],
-    include_attributes: bool = True,
-    include_relationships: bool = True,
-    include_metadata: bool = True,
+async def kit_stage_summary(
+    include_statistics: Annotated[
+        bool, Field(description="Opt in to a full stage.Traverse() count; may be expensive.")
+    ] = False,
 ) -> dict[str, Any]:
-    """Inspect one existing prim's state, properties, metadata and transform ops."""
+    """Read basic stage context; compute full traversal statistics only on request."""
+    # POST deliberately fails on old bridges instead of invoking their full-traversal GET.
     return await _post(
-        "kit_prim_inspect",
-        "/khl/lab/prim/inspect",
-        {
-            "path": path,
-            "include_attributes": include_attributes,
-            "include_relationships": include_relationships,
-            "include_metadata": include_metadata,
-        },
+        "kit_stage_summary", "/khl/lab/stage/summary",
+        {"include_statistics": include_statistics},
     )
 
 
@@ -233,73 +213,10 @@ async def kit_extensions_list(
     )
 
 
-@mcp.tool(title="Read Kit setting", **_tool_options("kit_setting_get"))
-async def kit_setting_get(
-    path: Annotated[
-        str,
-        Field(description="Absolute Carb setting path, such as /renderer/multiGpu/enable."),
-    ],
-) -> dict[str, Any]:
-    """Read one Carb setting from the active Kit process."""
-    return await _post("kit_setting_get", "/khl/lab/settings/get", {"path": path})
-
-
 @mcp.tool(title="Inspect active viewport", **_tool_options("kit_viewport_info"))
 async def kit_viewport_info() -> dict[str, Any]:
     """Read the active viewport's camera, resolution and render-product path."""
     return await _get("kit_viewport_info", "/khl/lab/viewport/info")
-
-
-@mcp.tool(title="Create live USD prim", **_tool_options("kit_prim_create"))
-async def kit_prim_create(
-    path: Annotated[
-        str,
-        Field(
-            min_length=2,
-            max_length=MAX_PRIM_PATH_CHARS,
-            pattern=PRIM_PATH_PATTERN.pattern,
-            description=(
-                "Absolute live USD prim path. For tests or unspecified locations, prefer "
-                "/World/AgentSceneLab/<name>."
-            ),
-        ),
-    ],
-    prim_type: PrimType = "Xform",
-) -> dict[str, Any]:
-    """Create one new live prim using validated server-generated Kit Python."""
-    try:
-        source = build_create_prim_source(path, prim_type)
-    except ValueError as exc:
-        raise ToolError(f"INVALID_PRIM_REQUEST: {exc}") from exc
-    return await _controlled_python_post(
-        "kit_prim_create",
-        {"path": path, "prim_type": prim_type},
-        source,
-    )
-
-
-@mcp.tool(title="Remove live USD prim", **_tool_options("kit_prim_remove"))
-async def kit_prim_remove(
-    path: Annotated[
-        str,
-        Field(
-            min_length=2,
-            max_length=MAX_PRIM_PATH_CHARS,
-            pattern=PRIM_PATH_PATTERN.pattern,
-            description="Exact absolute path of the live prim subtree to remove.",
-        ),
-    ],
-) -> dict[str, Any]:
-    """Remove one exact live prim using validated server-generated Kit Python."""
-    try:
-        source = build_remove_prim_source(path)
-    except ValueError as exc:
-        raise ToolError(f"INVALID_PRIM_REQUEST: {exc}") from exc
-    return await _controlled_python_post(
-        "kit_prim_remove",
-        {"path": path},
-        source,
-    )
 
 
 @mcp.tool(title="Execute unrestricted Kit Python", **_tool_options("kit_execute_python"))
@@ -316,9 +233,9 @@ async def kit_execute_python(
         ),
     ],
 ) -> dict[str, Any]:
-    """Development escape hatch: execute unrestricted Python inside local Kit.
+    """Execute development Python inside local Kit.
 
-    Prefer deterministic Kit Lab tools when they cover the task. The runtime is
+    Develop and validate reusable installed-version Kit/USD source. The runtime is
     technically capable of broad effects, so the MCP policy forbids persistence,
     external package injection, blocking loops, and policy bypass even after the
     user authorizes Python. It must target only the local development laboratory.
@@ -405,6 +322,59 @@ async def kit_experiment_finish(
 ) -> dict[str, Any]:
     """Finish the active experiment, write summary.md and clear the current pointer."""
     return _experiment_result(lambda: experiments.finish(summary, outcome))
+
+
+@mcp.tool(title="Inspect Kit lifecycle configuration", **_tool_options("kit_lifecycle_config"))
+async def kit_lifecycle_config(
+    kit_id: Literal["nchc-kit-dev-main"] = KIT_ID,
+) -> dict[str, Any]:
+    """Read operator-configured launch settings and process-inspection diagnostics."""
+    return await _lifecycle_operation(lambda lifecycle: lifecycle.configuration(), kit_id)
+
+
+@mcp.tool(title="Identify managed Kit status", **_tool_options("kit_status"))
+async def kit_status(kit_id: Literal["nchc-kit-dev-main"] = KIT_ID) -> dict[str, Any]:
+    """Rediscover Kit by persistent OS environment identity, then check bridge readiness."""
+    return await _lifecycle_operation(lambda lifecycle: lifecycle.status(), kit_id)
+
+
+@mcp.tool(title="Start managed Kit", **_tool_options("kit_start"))
+async def kit_start(
+    ctx: Context,
+    kit_id: Literal["nchc-kit-dev-main"] = KIT_ID,
+    readiness_timeout: Annotated[float | None, Field(gt=0, le=3600)] = None,
+) -> dict[str, Any]:
+    """Start the approved launcher if no identified or untagged Kit is already running."""
+    return await _lifecycle_operation(
+        lambda lifecycle: lifecycle.start(readiness_timeout, ctx.report_progress), kit_id)
+
+
+@mcp.tool(title="Stop managed Kit", **_tool_options("kit_stop"))
+async def kit_stop(
+    ctx: Context,
+    kit_id: Literal["nchc-kit-dev-main"] = KIT_ID,
+    force: Annotated[bool, Field(description="Explicitly allow SIGKILL after the graceful shutdown timeout.")] = False,
+) -> dict[str, Any]:
+    """Rediscover exactly one identified Kit and validate its pidfd before signalling."""
+    return await _lifecycle_operation(lambda lifecycle: lifecycle.stop(force, ctx.report_progress), kit_id)
+
+
+@mcp.tool(title="Restart managed Kit", **_tool_options("kit_restart"))
+async def kit_restart(
+    ctx: Context,
+    kit_id: Literal["nchc-kit-dev-main"] = KIT_ID,
+    force: Annotated[bool, Field(description="Explicitly allow SIGKILL after the graceful shutdown timeout.")] = False,
+    readiness_timeout: Annotated[float | None, Field(gt=0, le=3600)] = None,
+) -> dict[str, Any]:
+    """Stop the currently identified Kit, confirm exit, then launch with the same Kit ID."""
+    return await _lifecycle_operation(
+        lambda lifecycle: lifecycle.restart(force, readiness_timeout, ctx.report_progress), kit_id)
+
+
+@mcp.tool(title="Discover native Kit log paths", **_tool_options("kit_log_paths"))
+async def kit_log_paths(kit_id: Literal["nchc-kit-dev-main"] = KIT_ID) -> dict[str, Any]:
+    """Return process-associated native/output log paths without reading file contents."""
+    return await _lifecycle_operation(lambda lifecycle: lifecycle.log_paths(), kit_id)
 
 
 def main() -> None:

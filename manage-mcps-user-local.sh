@@ -710,8 +710,8 @@ verify_selected() {
     fi
     printf 'Metadata report: %s\n' "$report_path"
     if "$full_kit_lab"; then
-        printf '%s\n' 'NOTICE: Kit Lab full verification creates an experiment and briefly creates/removes a temporary test prim.'
-        "$repo_root/source/mcp/khl_kit_lab_mcp/verify-user-local.sh" || return 1
+        printf '%s\n' 'NOTICE: Kit Lab full verification creates an experiment and executes Kit Python (2 + 2).'
+        "$repo_root/source/mcp/khl_kit_lab_mcp/verify-user-local.sh" --full || return 1
     fi
 }
 

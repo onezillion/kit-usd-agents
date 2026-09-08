@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from mcp import Client
 
@@ -10,11 +11,6 @@ from mcp import Client
 _SERVER_IMPORT_ROOT = tempfile.TemporaryDirectory()
 os.environ["KIT_LAB_EXPERIMENT_ROOT"] = str(Path(_SERVER_IMPORT_ROOT.name) / "experiments")
 
-from khl_kit_lab_mcp.live_stage import (  # noqa: E402
-    build_create_prim_source,
-    build_remove_prim_source,
-    validate_prim_path,
-)
 from khl_kit_lab_mcp.policy import (  # noqa: E402
     PLAYGROUND_ROOT,
     POLICY_FINGERPRINT,
@@ -25,6 +21,17 @@ from khl_kit_lab_mcp.policy import (  # noqa: E402
     policy_payload,
 )
 from khl_kit_lab_mcp.server import mcp  # noqa: E402
+from khl_kit_lab_mcp import server  # noqa: E402
+from khl_kit_lab_mcp.experiments import ExperimentStore  # noqa: E402
+
+
+RETAINED_TOOLS = {
+    "kit_lab_policy", "kit_lab_status", "kit_runtime_info", "kit_stage_summary",
+    "kit_extensions_list", "kit_viewport_info", "kit_execute_python",
+    "kit_reset_python_session", "kit_experiment_start", "kit_experiment_current",
+    "kit_experiment_list", "kit_experiment_get", "kit_experiment_note", "kit_experiment_finish",
+    "kit_lifecycle_config", "kit_status", "kit_start", "kit_stop", "kit_restart", "kit_log_paths",
+}
 
 
 class PolicyMetadataTests(unittest.TestCase):
@@ -34,7 +41,8 @@ class PolicyMetadataTests(unittest.TestCase):
     def test_registered_tools_exactly_match_policy_entries(self) -> None:
         tools = self.registered_tools()
         self.assertEqual({tool.name for tool in tools}, set(TOOL_POLICIES))
-        self.assertEqual(len(tools), 18)
+        self.assertEqual(len(tools), 20)
+        self.assertEqual({tool.name for tool in tools}, RETAINED_TOOLS)
 
     def test_descriptions_annotations_and_meta_match_policy(self) -> None:
         for tool in self.registered_tools():
@@ -104,53 +112,82 @@ class PolicyMetadataTests(unittest.TestCase):
             POLICY_FINGERPRINT,
         )
 
+    def test_summary_defaults_to_typed_post_and_records_opt_in(self):
+        async def exercise():
+            post = AsyncMock(return_value={"ok": True, "result": {}})
+            get = AsyncMock(side_effect=AssertionError("must not use old GET"))
+            with patch.object(server.client, "post", post), patch.object(server.client, "get", get):
+                async with Client(mcp) as connected:
+                    tools = (await connected.list_tools()).tools
+                    schema = next(t for t in tools if t.name == "kit_stage_summary").input_schema
+                    self.assertFalse(schema["properties"]["include_statistics"]["default"])
+                    self.assertFalse((await connected.call_tool("kit_stage_summary", {})).is_error)
+                    self.assertFalse((await connected.call_tool(
+                        "kit_stage_summary", {"include_statistics": True})).is_error)
+            self.assertEqual([call.args for call in post.await_args_list], [
+                ("/khl/lab/stage/summary", {"include_statistics": False}),
+                ("/khl/lab/stage/summary", {"include_statistics": True}),
+            ])
+        asyncio.run(exercise())
 
-class LiveStageSourceTests(unittest.TestCase):
-    def test_general_absolute_paths_are_allowed(self) -> None:
-        self.assertEqual(
-            validate_prim_path("/World/ProductionLike/TestCube"), "/World/ProductionLike/TestCube"
-        )
-        self.assertEqual(
-            validate_prim_path("/OtherRoot/Scene/Camera_1"), "/OtherRoot/Scene/Camera_1"
-        )
+    def test_lifecycle_schemas_dispatch_and_progress_context(self):
+        from types import SimpleNamespace
+        from khl_kit_lab_mcp.lifecycle import LifecycleError
+        async def exercise():
+            async def start(timeout, progress):
+                self.assertEqual(timeout, 5)
+                await progress(1, 5, "fixture readiness")
+                return {"state": "READY"}
+            adapter = SimpleNamespace(start=AsyncMock(side_effect=start), stop=AsyncMock(return_value={"state": "STOPPED"}),
+                                      status=AsyncMock(side_effect=LifecycleError("AMBIGUOUS", "fixture")))
+            with patch.object(server, "_lifecycle", return_value=adapter):
+                async with Client(mcp) as connected:
+                    tools = {t.name: t for t in (await connected.list_tools()).tools}
+                    for name in ("kit_lifecycle_config", "kit_status", "kit_start", "kit_stop", "kit_restart", "kit_log_paths"):
+                        properties = tools[name].input_schema["properties"]
+                        self.assertEqual(properties["kit_id"]["const"], "nchc-kit-dev-main")
+                        self.assertFalse({"ctx", "pid", "command", "path", "port"} & properties.keys())
+                    self.assertFalse(tools["kit_stop"].input_schema["properties"]["force"]["default"])
+                    self.assertFalse((await connected.call_tool("kit_start", {"readiness_timeout": 5})).is_error)
+                    self.assertFalse((await connected.call_tool("kit_stop", {})).is_error)
+                    adapter.stop.assert_awaited_once()
+                    self.assertFalse(adapter.stop.await_args.args[0])
+                    result = await connected.call_tool("kit_status", {})
+                    self.assertTrue(result.is_error)
+                    self.assertIn("AMBIGUOUS", str(result.content))
+        asyncio.run(exercise())
 
-    def test_unsafe_or_property_paths_are_rejected(self) -> None:
-        for path in (
-            "World/Cube",
-            "/",
-            "/World/Cube.translate",
-            "/World/../Cube",
-            "/World/Bad-Name",
-            "/World//Cube",
-        ):
-            with self.subTest(path=path):
-                with self.assertRaises(ValueError):
-                    validate_prim_path(path)
-
-    def test_removal_protects_only_structural_roots(self) -> None:
-        with self.assertRaises(ValueError):
-            build_remove_prim_source("/World")
-        source = build_remove_prim_source("/World/UserChosen/Prim")
-        self.assertIn('path = "/World/UserChosen/Prim"', source)
-
-    def test_create_source_uses_enumerated_type_and_quoted_path(self) -> None:
-        source = build_create_prim_source("/World/AgentSceneLab/Cube", "Cube")
-        self.assertIn('path = "/World/AgentSceneLab/Cube"', source)
-        self.assertIn('prim_type = "Cube"', source)
-        self.assertIn("Parent prim does not exist", source)
-        self.assertNotIn("save", source.lower())
-        self.assertNotIn("omni.client", source)
-        compile(source, "<kit_prim_create>", "exec")
-
-    def test_python_injection_like_paths_are_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            build_create_prim_source('/World/Cube";open("/tmp/x","w")', "Cube")
-
-    def test_remove_source_is_valid_python(self) -> None:
-        source = build_remove_prim_source("/World/AgentSceneLab/Cube")
-        self.assertNotIn("save", source.lower())
-        self.assertNotIn("omni.client", source)
-        compile(source, "<kit_prim_remove>", "exec")
+    def test_python_source_exceptions_and_historical_retrieval_over_mcp(self):
+        async def exercise():
+            with tempfile.TemporaryDirectory() as temporary:
+                store = ExperimentStore(Path(temporary) / "experiments")
+                experiment_id = store.start("Historical compatibility", "Keep old evidence", [], {})["experiment_id"]
+                for retired in ("kit_prim_create", "kit_prim_remove", "kit_prim_inspect", "kit_setting_get"):
+                    store.record_operation(experiment_id, retired, {}, success=True,
+                                           elapsed_ms=1, result={"ok": True})
+                code = "print('captured')\nraise ValueError('fixture')"
+                response = {"ok": False, "stdout": "captured\n", "stderr": "",
+                            "exception_type": "ValueError", "traceback": "ValueError: fixture"}
+                with patch.object(server, "experiments", store), patch.object(
+                    server.client, "post", AsyncMock(return_value=response)
+                ) as post:
+                    async with Client(mcp) as connected:
+                        result = await connected.call_tool("kit_execute_python", {"code": code})
+                        self.assertFalse(result.is_error)
+                        self.assertEqual(result.structured_content, response)
+                    post.assert_awaited_once_with("/khl/lab/python/execute", {"code": code})
+                store.finish("fixture complete", "success")
+                with patch.object(server, "experiments", ExperimentStore(store.root)):
+                    async with Client(mcp) as connected:
+                        result = await connected.call_tool("kit_experiment_get", {"experiment_id": experiment_id})
+                self.assertFalse(result.is_error)
+                events = result.structured_content["events"]
+                self.assertTrue({"kit_prim_create", "kit_prim_remove", "kit_prim_inspect", "kit_setting_get"}
+                                <= {e.get("tool") for e in events})
+                event = next(e for e in events if e.get("tool") == "kit_execute_python")
+                self.assertEqual(event["result_class"], "python_exception_result")
+                self.assertEqual((store.root / experiment_id / event["python_source_file"]).read_text(), code)
+        asyncio.run(exercise())
 
 
 if __name__ == "__main__":

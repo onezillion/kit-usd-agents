@@ -8,7 +8,7 @@ from copy import deepcopy
 from typing import Any
 
 
-POLICY_VERSION = "1.0"
+POLICY_VERSION = "2.1"
 PLAYGROUND_ROOT = "/World/AgentSceneLab"
 PYTHON_PERMISSION_CHOICES = [
     "Allow once",
@@ -18,19 +18,35 @@ PYTHON_PERMISSION_CHOICES = [
     "Continue without Kit Python / use a safer alternative",
 ]
 
-SERVER_INSTRUCTIONS = f"""KHL Kit Lab controls one local development Kit runtime.
-Read-only inspection tools may be used without asking. Live scene mutation tools may be
-used when the user's task clearly asks to build, change, remove, or clean live stage state;
-if a test or unspecified location needs a playground, prefer {PLAYGROUND_ROOT}. Live
-mutation never authorizes stage save/export, local file persistence, or Nucleus writes.
+SERVER_INSTRUCTIONS = f"""KHL Kit Lab develops, executes, observes, and debugs real Python
+inside one local development Kit runtime. Write installed-version Kit/USD source that can
+be reused as a script, extension, or scripting component. Use Python for scene, attribute,
+and settings investigation when needed; MCP shortcut success does not validate a source
+deliverable. Read-only inspection tools may be used without asking. General Python remains
+ELEVATED_EXECUTION even when its intended use is inspection.
 Before the first kit_execute_python call, ask unless the user already authorized general
 Kit Python for this task/session. Offer allow once, allow for session, deny once, deny for
-session, or continue with a safer alternative. Session authorization does not permit file,
-Nucleus, Git, external-package, long-blocking-loop, or policy-bypass behavior. Ask before
-runtime/session reset unless clearly authorized. Experiment-control tools may be used
-without repeated confirmation when the task explicitly asks to record an experiment.
-No persistent-write or destructive-external tool is exposed by this server. Tool
-annotations are hints; descriptions and the kit_lab_policy result define usage policy.
+session, or continue with a safer alternative. Honor existing session authorization without
+repeated prompts and keep calls within its scope. Session authorization does not permit
+file, Nucleus, Git, external-package, long-blocking-loop, or policy-bypass behavior.
+Live mutation never authorizes stage save/export, local file persistence, or Nucleus writes.
+For tests or unspecified locations, prefer {PLAYGROUND_ROOT}.
+Ask before namespace reset unless clearly authorized. Reset is not a Kit restart, task
+cancellation, module unload, or full cleanup. Client timeout does not prove execution stopped.
+Experiment-control tools may be used without repeated confirmation when the task explicitly
+asks to record an experiment. Preserve unrelated active experiments and existing records.
+Lifecycle status/log discovery identify only KHL_KIT_ID=nchc-kit-dev-main independently
+of HTTP, parentage, or saved PID. Start/stop/restart require task/session authorization
+for that process-control class; a clear lifecycle request suffices without repeated prompts.
+Stop/restart can discard unsaved runtime state. Graceful shutdown is the default; force=true
+requires explicit forced-termination authorization. Never signal ambiguous or untagged Kit.
+Setup is an explicit local CLI step, not a general MCP file-write tool. Start uses only the
+approved launcher/config, can produce Kit-managed runtime files and launch-output logs,
+and never grants arbitrary submitted-Python persistence. Readiness timeout preserves Kit.
+Log discovery returns paths only; reading native log contents requires task/session consent
+for the permitted root or file and remains subject to host/harness permissions.
+No arbitrary-file-write or destructive-external tool is exposed by this server. Tool annotations
+are hints; descriptions and the kit_lab_policy result define usage policy.
 """
 
 
@@ -116,29 +132,16 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
     ),
     "kit_stage_summary": _entry(
         "READ_ONLY",
-        side_effects="bounded inspection of the active USD stage",
+        side_effects="lightweight stage context by default; opt-in full prim traversal may be expensive",
         persistence="none",
         default_behavior="allow",
         implicit_authorization=_READ_ONLY_AUTH,
         explicit_authorization=_NO_EXPLICIT_AUTH,
         safer_alternative="none",
-        description="Read a bounded summary of the active USD stage without modifying it.",
+        description="Read basic stage context without full prim traversal. Set include_statistics=true to compute full Traverse() counts; this may be expensive. Otherwise statistics_computed is false and counts are null.",
         annotations=_annotations(read_only=True, destructive=False, idempotent=True),
     ),
-    "kit_prim_inspect": _entry(
-        "READ_ONLY",
-        side_effects="bounded inspection of one active USD prim",
-        persistence="none",
-        default_behavior="allow",
-        implicit_authorization=_READ_ONLY_AUTH,
-        explicit_authorization=_NO_EXPLICIT_AUTH,
-        safer_alternative="kit_stage_summary",
-        description=(
-            "Inspect one existing prim's state, properties, metadata, and transform ops "
-            "without modifying the stage."
-        ),
-        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
-    ),
+
     "kit_extensions_list": _entry(
         "READ_ONLY",
         side_effects="bounded inspection of installed Kit extension metadata",
@@ -150,17 +153,7 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
         description="List installed Kit extensions with optional filters; do not enable or disable them.",
         annotations=_annotations(read_only=True, destructive=False, idempotent=True),
     ),
-    "kit_setting_get": _entry(
-        "READ_ONLY",
-        side_effects="read one Carb setting from the active Kit process",
-        persistence="none",
-        default_behavior="allow",
-        implicit_authorization=_READ_ONLY_AUTH,
-        explicit_authorization=_NO_EXPLICIT_AUTH,
-        safer_alternative="none",
-        description="Read one Carb setting from the active Kit process without changing it.",
-        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
-    ),
+
     "kit_viewport_info": _entry(
         "READ_ONLY",
         side_effects="inspect active viewport metadata",
@@ -172,42 +165,8 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
         description="Read the active viewport's camera, resolution, and render-product path without modification.",
         annotations=_annotations(read_only=True, destructive=False, idempotent=True),
     ),
-    "kit_prim_create": _entry(
-        "LIVE_MUTATION",
-        side_effects="create one new prim in the currently open live USD stage",
-        persistence="live stage/session only; this tool never saves or exports",
-        default_behavior="allow",
-        implicit_authorization=(
-            "A clear request to build/change the live scene or create the named prim is sufficient."
-        ),
-        explicit_authorization="Required only when the current task does not clearly request live mutation.",
-        safer_alternative="kit_stage_summary or kit_prim_inspect",
-        description=(
-            f"Create one new live USD prim at an absolute path whose parent exists. Refuse "
-            f"an existing prim. "
-            f"For tests or unspecified locations, prefer {PLAYGROUND_ROOT}. Clear scene-building "
-            "intent authorizes this live mutation without a separate prompt. This tool never "
-            "saves/exports the stage or writes local/Nucleus content."
-        ),
-        annotations=_annotations(read_only=False, destructive=False, idempotent=False),
-    ),
-    "kit_prim_remove": _entry(
-        "LIVE_MUTATION",
-        side_effects="remove one exact prim subtree from the currently open live USD stage",
-        persistence="live stage/session only; this tool never saves or exports",
-        default_behavior="allow",
-        implicit_authorization=(
-            "A clear request to remove the named live prim or clean temporary test content is sufficient."
-        ),
-        explicit_authorization="Required when removal/cleanup intent is not clear from the current task.",
-        safer_alternative="kit_prim_inspect before removal",
-        description=(
-            "Remove one exact live USD prim subtree after clear removal/cleanup intent. Root and "
-            "/World removal are refused. This changes only live stage state and never saves/exports "
-            "the stage or deletes local/Nucleus content."
-        ),
-        annotations=_annotations(read_only=False, destructive=True, idempotent=True),
-    ),
+
+
     "kit_execute_python": _entry(
         "ELEVATED_EXECUTION",
         side_effects="unrestricted source executes inside the persistent local Kit interpreter",
@@ -218,9 +177,12 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
             "Allow once or allow for this session. Also honor deny once, deny for this session, "
             "or continue with a safer alternative."
         ),
-        safer_alternative="Use a deterministic read-only or live-mutation Kit Lab tool when sufficient.",
+        safer_alternative="Use retained read-only context tools or inspect installed source/documentation when sufficient.",
         description=(
-            "Execute unrestricted Python inside the persistent local development Kit. Before first "
+            "Develop and debug reusable installed-version Kit/USD Python in the persistent local "
+            "Kit. Use it for scene, attribute, and settings investigation; inspection intent does not "
+            "make arbitrary Python read-only. Preserves top-level await, last-expression results, "
+            "stdout/stderr/traceback capture, and experiment source recording. Before first "
             "use, ask unless the user already allowed it once/session; offer: Allow once, Allow for "
             "this session, Deny once, Deny for this session, or Continue without Python/use a safer "
             "alternative. Authorization never permits local/Nucleus/Git writes, save/export, external "
@@ -238,7 +200,8 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
         safer_alternative="Inspect kit_lab_status and avoid resetting when not required.",
         description=(
             "Clear retained variables in the persistent Kit Python namespace. Ask unless the task "
-            "clearly authorizes session reset; this may invalidate live development state."
+            "clearly authorizes session reset; this may invalidate live development state. "
+            "This is not a Kit restart, task cancellation, module unload, or full cleanup."
         ),
         annotations=_annotations(read_only=False, destructive=True, idempotent=True),
     ),
@@ -317,6 +280,55 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
         ),
         annotations=_annotations(read_only=False, destructive=False, idempotent=False),
     ),
+    "kit_lifecycle_config": _entry(
+        "READ_ONLY", side_effects="read local lifecycle config and candidate process identity metadata",
+        persistence="none", default_behavior="allow", implicit_authorization=_READ_ONLY_AUTH,
+        explicit_authorization=_NO_EXPLICIT_AUTH, safer_alternative="none",
+        description="Read the approved launch configuration and /proc inspection diagnostics for nchc-kit-dev-main. Setup uses lifecycle-user-local.sh setup; this tool changes no configuration.",
+        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
+    ),
+    "kit_status": _entry(
+        "READ_ONLY", side_effects="inspect Kit candidate executable/environment identity and loopback readiness",
+        persistence="none", default_behavior="allow", implicit_authorization=_READ_ONLY_AUTH,
+        explicit_authorization=_NO_EXPLICIT_AUTH, safer_alternative="none",
+        description="Rediscover nchc-kit-dev-main by KHL_KIT_ID in the OS process environment, then correlate bridge PID/start time. Report STOPPED, STARTING, READY, UNRESPONSIVE, AMBIGUOUS or inspection failure without requiring Kit to respond. Never adopt an untagged Kit.",
+        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
+    ),
+    "kit_start": _entry(
+        "RUNTIME_CONTROL", side_effects="launch the approved local Kit with persistent identity and poll readiness",
+        persistence="Kit-managed runtime files and infrastructure-managed launch output",
+        default_behavior="ask", implicit_authorization="A clear request to start this development Kit is sufficient.",
+        explicit_authorization="Ask unless task/session already authorizes starting Kit.",
+        safer_alternative="kit_status",
+        description="Start nchc-kit-dev-main using the approved absolute launcher, cwd and structured arguments. Refuse ambiguity or untagged Kit. Default readiness wait is 180 seconds with progress; timeout preserves the process. Honor existing lifecycle authorization; this may create Kit runtime and launch-output files.",
+        annotations=_annotations(read_only=False, destructive=False, idempotent=True),
+    ),
+    "kit_stop": _entry(
+        "RUNTIME_CONTROL", side_effects="terminate exactly one freshly identified Kit, potentially losing unsaved state",
+        persistence="Kit may write its normal shutdown state", default_behavior="ask",
+        implicit_authorization="A clear request to stop this development Kit is sufficient for SIGTERM.",
+        explicit_authorization="Ask unless stop is authorized; force=true requires explicit forced-termination authorization.",
+        safer_alternative="kit_status",
+        description="Stop nchc-kit-dev-main by its environment identity, independent of HTTP and MCP parentage. Validate a pidfd before signalling. SIGTERM waits 30 seconds by default; force=false preserves Kit on timeout. Only explicit force=true permits SIGKILL and a separate bounded wait. May lose unsaved state; never signal unrelated or ambiguous processes.",
+        annotations=_annotations(read_only=False, destructive=True, idempotent=True),
+    ),
+    "kit_restart": _entry(
+        "RUNTIME_CONTROL", side_effects="stop identified Kit and launch a new process with the same persistent identity",
+        persistence="Kit-managed runtime files and infrastructure-managed launch output", default_behavior="ask",
+        implicit_authorization="A clear request to restart this development Kit is sufficient for graceful restart.",
+        explicit_authorization="Ask unless restart is authorized; force=true requires explicit forced-termination authorization.",
+        safer_alternative="kit_status",
+        description="Rediscover and stop nchc-kit-dev-main, confirm exit, then launch with the same KHL_KIT_ID and wait for readiness. PID may change and MCP need not have launched the prior Kit. Refuse ambiguity and process replacement; no new launch after failed shutdown. Readiness timeout preserves the new process. May lose unsaved state; honor existing lifecycle authorization.",
+        annotations=_annotations(read_only=False, destructive=True, idempotent=False),
+    ),
+    "kit_log_paths": _entry(
+        "READ_ONLY", side_effects="read native log-path setting or identified process descriptor links; no log contents",
+        persistence="none", default_behavior="allow", implicit_authorization=_READ_ONLY_AUTH,
+        explicit_authorization=_NO_EXPLICIT_AUTH, safer_alternative="kit_status",
+        description="Discover native Kit and captured launch-output paths for nchc-kit-dev-main using matching bridge identity or open process descriptors. Enforce configured roots, report association/ambiguity, and never choose by newest mtime. Returns paths only. Read contents separately through normal tools after task/session consent; this tool grants no host permissions.",
+        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
+    ),
+
 }
 
 POLICY_FINGERPRINT = hashlib.sha256(

@@ -51,8 +51,9 @@ Use the available tools according to the task:
 - use VS Code tools when editor/workspace operations are more appropriate than shell commands;
 - use todos for multi-step work when tracking progress improves reliability;
 - use terminal execution for builds, tests, diagnostics, and repository operations;
-- use `kit-dev-mcp/*` only for NVIDIA Kit documentation and knowledge retrieval;
-- use `kit-lab-runtime/*` for live Kit inspection, controlled mutation, authorized Python, and experiments, following its own policy.
+- use `kit-dev-mcp` for NVIDIA documentation/knowledge and `kit-lab-runtime` for live Kit work.
+- develop and debug installed-version Kit/USD Python that can become a reusable script,
+  extension, or scripting-component source; MCP shortcut success does not validate that source.
 
 ## Live Kit safety
 
@@ -60,8 +61,10 @@ For live Kit experiments:
 - check the current Phase 2C experiment first;
 - start an experiment when appropriate and record deterministic baseline evidence before consequential mutation;
 - preserve unrelated active experiments;
-- prefer deterministic MCP inspection before arbitrary Python;
-- use Kit Python only where needed;
+- use retained read-only MCP tools for basic context;
+- use authorized Kit Python for scene, attribute, and settings investigation and development;
+- arbitrary Python remains elevated execution even for inspection; honor existing task/session
+  authorization without repeated prompts and remain within its scope;
 - independently verify mutations and cleanup;
 - clean temporary stage content;
 - finish the experiment only after verification.
@@ -86,6 +89,13 @@ After live experiments verify, when relevant:
 - Kit Lab is responsive and not busy;
 - no worker/shared-memory resource remains;
 - renderer/settings changed by the experiment are restored or explicitly reported.
+
+Kit lifecycle tools target only `nchc-kit-dev-main`; use `kit_status` for OS identity
+and readiness even when Kit HTTP is unavailable. Honor existing start/stop/restart
+authorization; force requires explicit authorization. Rediscover after manual restarts,
+and do not adopt untagged Kit or infer identity from a port/PID alone. `kit_log_paths`
+returns associated paths only; obtain separate task/session consent before reading
+native log contents through ordinary tools.
 
 ## Performance and benchmark evidence
 

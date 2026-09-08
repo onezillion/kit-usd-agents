@@ -3,8 +3,10 @@ import asyncio
 import contextlib
 import inspect
 import io
+import os
 import time
 import traceback
+from itertools import islice
 from typing import Any, Optional
 
 from omni.services.core.routers import ServiceAPIRouter
@@ -26,7 +28,7 @@ legacy_router = ServiceAPIRouter(
 _namespace = {}
 _execute_lock = asyncio.Lock()
 
-API_VERSION = "0.2.0"
+API_VERSION = "0.4.0"
 MAX_COLLECTION_ITEMS = 256
 MAX_STRING_LENGTH = 20_000
 
@@ -39,21 +41,16 @@ class ExecuteRequest(BaseModel):
     )
 
 
-class PrimInspectRequest(BaseModel):
-    path: str = Field(..., min_length=1, description="Absolute USD prim path.")
-    include_attributes: bool = True
-    include_relationships: bool = True
-    include_metadata: bool = True
+class StageSummaryRequest(BaseModel):
+    include_statistics: bool = Field(
+        False, description="Compute full stage.Traverse() statistics; may be expensive."
+    )
 
 
 class ExtensionsListRequest(BaseModel):
     enabled_only: bool = False
     search: Optional[str] = None
     limit: int = Field(500, ge=1, le=5000)
-
-
-class SettingGetRequest(BaseModel):
-    path: str = Field(..., min_length=1, description="Absolute Carb setting path.")
 
 
 def reset_namespace():
@@ -237,6 +234,8 @@ def _status_payload(service_name):
         "ok": True,
         "service": service_name,
         "api_version": API_VERSION,
+        "kit_id": os.environ.get("KHL_KIT_ID"),
+        "pid": os.getpid(),
         "busy": _execute_lock.locked(),
         "namespace_keys": sorted(
             key for key in _namespace if not key.startswith("__")
@@ -244,10 +243,9 @@ def _status_payload(service_name):
         "capabilities": {
             "read": [
                 "runtime.info",
+                "runtime.identity",
                 "stage.summary",
-                "prim.inspect",
                 "extensions.list",
-                "settings.get",
                 "viewport.info",
             ],
             "development": [
@@ -304,7 +302,33 @@ async def runtime_info():
     return await _run_read_operation("runtime.info", _runtime_info_impl)
 
 
-def _stage_summary_impl():
+def _runtime_identity_impl():
+    import carb
+    import omni.kit.app
+
+    # Read only this process's identity and native log setting, never enumerate its environment.
+    with open("/proc/self/stat", encoding="utf-8") as stream:
+        start_ticks = int(stream.read().rsplit(")", 1)[1].split()[19])
+    return {
+        "kit_id": os.environ.get("KHL_KIT_ID"),
+        "pid": os.getpid(),
+        "start_ticks": start_ticks,
+        "api_version": API_VERSION,
+        "ready": bool(omni.kit.app.get_app().is_app_ready()),
+        "native_log_path": _json_safe(carb.settings.get_settings().get("/log/file")),
+    }
+
+
+@router.get("/runtime/identity", summary="Read Kit identity, readiness and native log path")
+async def runtime_identity():
+    # Independent of the execution lock: a cooperative Python task need not block health checks.
+    try:
+        return _success("runtime.identity", _runtime_identity_impl())
+    except Exception as exc:
+        return _failure("runtime.identity", "IDENTITY_UNAVAILABLE", type(exc).__name__)
+
+
+def _stage_summary_impl(include_statistics=False):
     import omni.usd
     from pxr import UsdGeom
 
@@ -313,16 +337,24 @@ def _stage_summary_impl():
     if stage is None:
         return {
             "available": False,
+            "statistics_computed": False,
+            "prim_count": None,
+            "type_counts": None,
             "context_stage_url": _json_safe(
                 _first_member(context, ("get_stage_url",), "")
             ),
         }
 
-    prims = list(stage.Traverse())
-    type_counts = {}
-    for prim in prims:
-        type_name = prim.GetTypeName() or "<untyped>"
-        type_counts[type_name] = type_counts.get(type_name, 0) + 1
+    prim_count = None
+    type_counts = None
+    if include_statistics:
+        prim_count = 0
+        type_counts = {}
+        # Traverse() uses USD's default predicate; this is not a count of TraverseAll().
+        for prim in stage.Traverse():
+            prim_count += 1
+            type_name = prim.GetTypeName() or "<untyped>"
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
 
     default_prim = stage.GetDefaultPrim()
     edit_target = stage.GetEditTarget()
@@ -338,6 +370,7 @@ def _stage_summary_impl():
     except Exception:
         layer_stack = []
 
+    root_children = list(islice(stage.GetPseudoRoot().GetChildren(), MAX_COLLECTION_ITEMS + 1))
     return {
         "available": True,
         "root_layer": stage.GetRootLayer().identifier,
@@ -351,121 +384,27 @@ def _stage_summary_impl():
         "end_time_code": stage.GetEndTimeCode(),
         "time_codes_per_second": stage.GetTimeCodesPerSecond(),
         "frames_per_second": stage.GetFramesPerSecond(),
-        "prim_count": len(prims),
+        "statistics_computed": bool(include_statistics),
+        "statistics_scope": "Usd.Stage.Traverse default predicate" if include_statistics else None,
+        "prim_count": prim_count,
         "root_children": [
-            str(prim.GetPath()) for prim in stage.GetPseudoRoot().GetChildren()
+            str(prim.GetPath()) for prim in root_children[:MAX_COLLECTION_ITEMS]
         ],
-        "type_counts": dict(sorted(type_counts.items())),
+        "root_children_truncated": len(root_children) > MAX_COLLECTION_ITEMS,
+        "type_counts": dict(sorted(type_counts.items())) if type_counts is not None else None,
     }
 
 
 @router.get("/stage/summary", summary="Summarize the active USD stage")
-async def stage_summary():
-    return await _run_read_operation("stage.summary", _stage_summary_impl)
-
-
-def _prim_inspect_impl(request: PrimInspectRequest):
-    import omni.usd
-    from pxr import Sdf, UsdGeom
-
-    path = Sdf.Path(request.path)
-    if request.path != "/" and (
-        not path.IsAbsolutePath() or not path.IsPrimPath()
-    ):
-        raise ValueError("path must be an absolute USD prim path")
-
-    stage = omni.usd.get_context().get_stage()
-    if stage is None:
-        raise RuntimeError("no USD stage is currently open")
-
-    prim = stage.GetPrimAtPath(path)
-    if not prim:
-        raise ValueError(f"prim does not exist: {request.path}")
-
-    result = {
-        "path": str(prim.GetPath()),
-        "name": prim.GetName(),
-        "type_name": prim.GetTypeName(),
-        "parent": (
-            str(prim.GetParent().GetPath())
-            if prim.GetParent()
-            else None
-        ),
-        "children": [str(child.GetPath()) for child in prim.GetChildren()],
-        "active": prim.IsActive(),
-        "defined": prim.IsDefined(),
-        "loaded": prim.IsLoaded(),
-        "instance": prim.IsInstance(),
-        "instance_proxy": prim.IsInstanceProxy(),
-        "prototype": prim.IsPrototype(),
-        "abstract": prim.IsAbstract(),
-    }
-
-    if request.include_metadata:
-        result["metadata"] = _json_safe(prim.GetAllMetadata())
-
-    if request.include_attributes:
-        attributes = []
-        for attribute in prim.GetAttributes()[:MAX_COLLECTION_ITEMS]:
-            try:
-                value = attribute.Get()
-                value_error = None
-            except Exception as exc:
-                value = None
-                value_error = f"{type(exc).__name__}: {exc}"
-
-            attributes.append(
-                {
-                    "name": attribute.GetName(),
-                    "type_name": str(attribute.GetTypeName()),
-                    "custom": attribute.IsCustom(),
-                    "authored": attribute.HasAuthoredValueOpinion(),
-                    "value": _json_safe(value),
-                    "value_error": value_error,
-                    "connections": [
-                        str(target) for target in attribute.GetConnections()
-                    ],
-                    "time_samples": _json_safe(attribute.GetTimeSamples()),
-                }
-            )
-        result["attributes"] = attributes
-
-    if request.include_relationships:
-        result["relationships"] = [
-            {
-                "name": relationship.GetName(),
-                "custom": relationship.IsCustom(),
-                "targets": [
-                    str(target) for target in relationship.GetTargets()
-                ],
-            }
-            for relationship in prim.GetRelationships()[:MAX_COLLECTION_ITEMS]
-        ]
-
-    try:
-        xformable = UsdGeom.Xformable(prim)
-        result["xform_ops"] = [
-            {
-                "name": op.GetName(),
-                "op_type": str(op.GetOpType()),
-                "precision": str(op.GetPrecision()),
-                "value": _json_safe(op.Get()),
-            }
-            for op in xformable.GetOrderedXformOps()
-        ] if xformable else []
-    except Exception as exc:
-        result["xform_ops"] = []
-        result["xform_error"] = f"{type(exc).__name__}: {exc}"
-
-    return result
-
-
-@router.post("/prim/inspect", summary="Inspect one USD prim")
-async def prim_inspect(request: PrimInspectRequest):
+async def stage_summary(include_statistics: bool = False):
     return await _run_read_operation(
-        "prim.inspect",
-        lambda: _prim_inspect_impl(request),
+        "stage.summary", lambda: _stage_summary_impl(include_statistics)
     )
+
+
+@router.post("/stage/summary", summary="Summarize USD stage with optional full statistics")
+async def stage_summary_request(request: StageSummaryRequest):
+    return await stage_summary(request.include_statistics)
 
 
 def _extensions_list_impl(request: ExtensionsListRequest):
@@ -533,34 +472,6 @@ async def extensions_list(request: ExtensionsListRequest):
     return await _run_read_operation(
         "extensions.list",
         lambda: _extensions_list_impl(request),
-    )
-
-
-def _settings_get_impl(request: SettingGetRequest):
-    import carb
-
-    if not request.path.startswith("/"):
-        raise ValueError("path must be an absolute Carb setting path")
-
-    settings = carb.settings.get_settings()
-    value = settings.get(request.path)
-    try:
-        setting_type = str(settings.get_type(request.path))
-    except Exception:
-        setting_type = type(value).__name__ if value is not None else None
-
-    return {
-        "path": request.path,
-        "type": setting_type,
-        "value": _json_safe(value),
-    }
-
-
-@router.post("/settings/get", summary="Read one Carb setting")
-async def settings_get(request: SettingGetRequest):
-    return await _run_read_operation(
-        "settings.get",
-        lambda: _settings_get_impl(request),
     )
 
 

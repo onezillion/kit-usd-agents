@@ -10,7 +10,7 @@ from typing import Any
 from mcp import Client
 
 from khl_kit_lab_mcp.experiments import DEFAULT_EXPERIMENT_ROOT, validate_experiment_id
-from khl_kit_lab_mcp.policy import POLICY_FINGERPRINT, SERVER_INSTRUCTIONS, TOOL_POLICIES
+from khl_kit_lab_mcp.policy import SERVER_INSTRUCTIONS, TOOL_POLICIES, tool_meta
 
 
 EXPECTED_TOOLS = {
@@ -18,12 +18,8 @@ EXPECTED_TOOLS = {
     "kit_lab_status",
     "kit_runtime_info",
     "kit_stage_summary",
-    "kit_prim_inspect",
     "kit_extensions_list",
-    "kit_setting_get",
     "kit_viewport_info",
-    "kit_prim_create",
-    "kit_prim_remove",
     "kit_execute_python",
     "kit_reset_python_session",
     "kit_experiment_start",
@@ -32,6 +28,7 @@ EXPECTED_TOOLS = {
     "kit_experiment_get",
     "kit_experiment_note",
     "kit_experiment_finish",
+    "kit_lifecycle_config", "kit_status", "kit_start", "kit_stop", "kit_restart", "kit_log_paths",
 }
 EXPECTED_MCP_SDK_VERSION = "2.1.1"
 
@@ -76,41 +73,16 @@ def contained_record_file(directory: Path, reference: Any) -> Path:
 
 def verify_record_files(experiment_id: str, events: list[dict[str, Any]]) -> None:
     directory = experiment_directory(experiment_id)
-    stage_event = next(
-        (event for event in events if event.get("tool") == "kit_stage_summary"),
-        None,
-    )
-    python_event = next(
-        (event for event in events if event.get("tool") == "kit_execute_python"),
-        None,
-    )
-    create_event = next(
-        (event for event in events if event.get("tool") == "kit_prim_create"),
-        None,
-    )
-    remove_event = next(
-        (event for event in events if event.get("tool") == "kit_prim_remove"),
-        None,
-    )
-    if any(event is None for event in (stage_event, create_event, remove_event, python_event)):
-        raise SystemExit("Expected recorded tool events were not returned")
-    for event in (stage_event, create_event, remove_event, python_event):
-        assert event is not None
-        result_file = contained_record_file(directory, event.get("result_file"))
-        if not result_file.is_file():
-            raise SystemExit(f"Missing recorded result file: {result_file}")
-    for event in (create_event, remove_event):
-        assert event is not None
-        source_file = contained_record_file(directory, event.get("python_source_file"))
-        if not source_file.is_file():
-            raise SystemExit(f"Missing controlled Python source: {source_file}")
-        source_text = source_file.read_text(encoding="utf-8")
-        if "open(" in source_text or "omni.client" in source_text or ".Save(" in source_text:
-            raise SystemExit("Controlled live-mutation source contains a persistence API")
-    assert python_event is not None
-    source_file = contained_record_file(directory, python_event.get("python_source_file"))
-    if not source_file.is_file() or source_file.read_text(encoding="utf-8") != "2 + 2":
-        raise SystemExit("Recorded Python source is missing or incorrect")
+    # Historical events may name retired tools. Validate evidence, not today's inventory.
+    if not events:
+        raise SystemExit("Expected recorded events were not returned")
+    for event in events:
+        if event.get("tool") and not event.get("result_file"):
+            raise SystemExit("Tool event is missing its recorded result reference")
+        for field in ("result_file", "python_source_file"):
+            reference = event.get(field)
+            if reference and not contained_record_file(directory, reference).is_file():
+                raise SystemExit(f"Missing recorded evidence: {field}")
 
 
 async def check_tools(client: Client) -> None:
@@ -132,73 +104,51 @@ async def check_tools(client: Client) -> None:
         for field, value in expected["annotations"].items():
             if getattr(annotations, field) != value:
                 raise SystemExit(f"Tool annotation mismatch: {tool.name}.{field}")
-        metadata = tool.meta or {}
-        policy_meta = metadata.get("khl_policy", {})
-        if policy_meta.get("class") != expected["class"]:
+        if tool.meta != tool_meta(tool.name):
             raise SystemExit(f"Tool policy metadata mismatch: {tool.name}")
-        if policy_meta.get("fingerprint") != POLICY_FINGERPRINT:
-            raise SystemExit(f"Tool policy fingerprint mismatch: {tool.name}")
-    print("tool count: 18")
+        schema = tool.input_schema
+        if schema.get("type") != "object" or not isinstance(schema.get("properties"), dict):
+            raise SystemExit(f"Tool input schema missing or invalid: {tool.name}")
+        if tool.name == "kit_stage_summary":
+            option = schema["properties"].get("include_statistics", {})
+            if option.get("type") != "boolean" or option.get("default") is not False:
+                raise SystemExit("Stage summary must default to skipping statistics")
+    print("tool count: 20")
     print("expected tools: PASS")
     print("instructions/descriptions/annotations/policy metadata: PASS")
 
 
-async def verify_live_prim_mutation(client: Client) -> None:
-    playground = "/World/AgentSceneLab"
-    suffix = "Phase3PolicyCube" + datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
-    cube_path = f"{playground}/{suffix}"
-    parent_created = False
-    cube_created = False
+def validate_summary(response: dict[str, Any]) -> None:
+    result = response.get("result", {})
+    if result.get("statistics_computed") is not False:
+        raise SystemExit("Bridge activation pending or invalid summary: statistics were not explicitly skipped")
+    if result.get("prim_count") is not None or result.get("type_counts") is not None:
+        raise SystemExit("Default stage summary must return null uncomputed counts")
 
-    parent = await client.call_tool("kit_prim_inspect", {"path": playground})
-    if parent.is_error:
-        payload(
-            await client.call_tool(
-                "kit_prim_create",
-                {"path": playground, "prim_type": "Xform"},
-            )
-        )
-        parent_created = True
 
-    try:
-        created = payload(
-            await client.call_tool(
-                "kit_prim_create",
-                {"path": cube_path, "prim_type": "Cube"},
-            )
-        )
-        if cube_path not in json.dumps(created, ensure_ascii=False):
-            raise SystemExit("Created-prim result did not contain the requested path")
-        cube_created = True
+async def read_only_verification(endpoint: str) -> None:
+    async with Client(endpoint) as client:
+        await check_tools(client)
+        payload(await client.call_tool("kit_lab_status", {}))
+        validate_summary(payload(await client.call_tool("kit_stage_summary", {})))
+        payload(await client.call_tool("kit_experiment_current", {}))
+    print("KIT_LAB_READ_ONLY_OK")
 
-        inspected = payload(
-            await client.call_tool(
-                "kit_prim_inspect",
-                {"path": cube_path},
-            )
-        )
-        if cube_path not in json.dumps(inspected, ensure_ascii=False):
-            raise SystemExit("Independent prim inspection did not contain the requested path")
-        print("temporary live prim create/inspect: PASS")
-    finally:
-        cleanup_errors: list[str] = []
-        if cube_created:
-            try:
-                payload(await client.call_tool("kit_prim_remove", {"path": cube_path}))
-            except BaseException as exc:
-                cleanup_errors.append(f"cube cleanup failed: {exc}")
-        if parent_created:
-            try:
-                payload(await client.call_tool("kit_prim_remove", {"path": playground}))
-            except BaseException as exc:
-                cleanup_errors.append(f"playground cleanup failed: {exc}")
-        if cleanup_errors:
-            raise SystemExit("; ".join(cleanup_errors))
 
-    removed = await client.call_tool("kit_prim_inspect", {"path": cube_path})
-    if not removed.is_error:
-        raise SystemExit("Temporary cube remained inspectable after cleanup")
-    print("temporary live prim cleanup: PASS")
+async def lifecycle_verification(endpoint: str) -> None:
+    async with Client(endpoint) as client:
+        config = payload(await client.call_tool("kit_lifecycle_config", {}))
+        status = payload(await client.call_tool("kit_status", {}))
+        logs = payload(await client.call_tool("kit_log_paths", {}))
+    if config.get("inspection", {}).get("denied_candidates"):
+        raise SystemExit("Lifecycle service cannot inspect Kit candidates")
+    if status.get("state") != "READY" or status.get("kit_id") != "nchc-kit-dev-main":
+        raise SystemExit(f"Identified Kit is not ready: {status}")
+    if (logs.get("process") != status.get("process") or logs.get("contents_read") is not False
+            or logs.get("association") != "matching_bridge_identity" or not logs.get("native_log_path")):
+        raise SystemExit(f"Native log association failed or Kit changed during verification: {logs}")
+    print("lifecycle:", json.dumps({"status": status, "logs": logs}))
+    print("KIT_LAB_LIFECYCLE_OK")
 
 
 async def live_verification(endpoint: str) -> None:
@@ -217,9 +167,9 @@ async def live_verification(endpoint: str) -> None:
             await client.call_tool(
                 "kit_experiment_start",
                 {
-                    "title": f"Phase 3 MCP policy verification {stamp}",
+                    "title": f"Kit Lab Python recording verification {stamp}",
                     "objective": (
-                        "Verify model-visible policy metadata, controlled live mutation, "
+                        "Verify model-visible policy metadata, Python execution, "
                         "cleanup, and durable experiment recording."
                     ),
                     "tags": ["phase-3", "policy", "verification"],
@@ -232,18 +182,16 @@ async def live_verification(endpoint: str) -> None:
         payload(
             await client.call_tool(
                 "kit_experiment_note",
-                {"note": "Live verifier started policy, mutation, cleanup, and Python checks."},
+                {"note": "Live verifier started policy and Python recording checks."},
             )
         )
         print("experiment note: PASS")
 
-        payload(await client.call_tool("kit_stage_summary", {}))
+        validate_summary(payload(await client.call_tool("kit_stage_summary", {})))
         print("kit_stage_summary: PASS")
 
-        await verify_live_prim_mutation(client)
-
         python_result = payload(await client.call_tool("kit_execute_python", {"code": "2 + 2"}))
-        if not python_result.get("ok", False):
+        if not python_result.get("ok", False) or python_result.get("result") != "4":
             raise SystemExit(f"Harmless Python expression failed: {python_result}")
         print("kit_execute_python: PASS")
 
@@ -254,6 +202,14 @@ async def live_verification(endpoint: str) -> None:
             )
         )
         verify_record_files(experiment_id, retrieved["events"])
+        events = retrieved["events"]
+        if not any(e.get("tool") == "kit_stage_summary" for e in events):
+            raise SystemExit("Stage summary evidence was not recorded")
+        python_event = next((e for e in events if e.get("tool") == "kit_execute_python"), {})
+        source_file = contained_record_file(
+            experiment_directory(experiment_id), python_event.get("python_source_file"))
+        if not source_file.is_file() or source_file.read_text(encoding="utf-8") != "2 + 2":
+            raise SystemExit("Python source evidence is missing or incorrect")
         print("events/results/source files: PASS")
 
         payload(
@@ -261,7 +217,7 @@ async def live_verification(endpoint: str) -> None:
                 "kit_experiment_finish",
                 {
                     "summary": (
-                        "Phase 3 MCP policy metadata, controlled live mutation, cleanup, "
+                        "Phase 3 MCP policy metadata, Python execution, cleanup, "
                         "and Phase 2C persistence verification passed."
                     ),
                     "outcome": "success",
@@ -281,7 +237,7 @@ async def live_verification(endpoint: str) -> None:
         print("POST_RESTART_COMMAND:")
         print(f"./verify-user-local.sh --post-restart {experiment_id}")
 
-    print("KIT_LAB_PHASE3_LIVE_OK")
+    print("KIT_LAB_LIVE_OK")
 
 
 async def post_restart_verification(endpoint: str, experiment_id: str) -> None:
@@ -304,12 +260,16 @@ async def post_restart_verification(endpoint: str, experiment_id: str) -> None:
         if not (directory / "summary.md").is_file():
             raise SystemExit("summary.md is missing after restart")
     print("experiment ID:", experiment_id)
-    print("KIT_LAB_PHASE3_POST_RESTART_OK")
+    print("KIT_LAB_POST_RESTART_OK")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--post-restart", metavar="EXPERIMENT_ID")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--post-restart", metavar="EXPERIMENT_ID")
+    mode.add_argument("--full", action="store_true",
+                      help="Opt in to durable experiment writes and Kit Python execution (2 + 2).")
+    mode.add_argument("--lifecycle", action="store_true", help="Read-only baseline plus configured lifecycle identity/log checks")
     arguments = parser.parse_args()
     endpoint = os.environ.get("KIT_LAB_MCP_ENDPOINT", "http://127.0.0.1:9910/mcp")
     installed_mcp = version("mcp")
@@ -319,8 +279,12 @@ def main() -> None:
     print("Endpoint:", endpoint)
     if arguments.post_restart:
         asyncio.run(post_restart_verification(endpoint, arguments.post_restart))
-    else:
+    elif arguments.full:
         asyncio.run(live_verification(endpoint))
+    else:
+        asyncio.run(read_only_verification(endpoint))
+        if arguments.lifecycle:
+            asyncio.run(lifecycle_verification(endpoint))
 
 
 if __name__ == "__main__":
