@@ -1,8 +1,20 @@
 {
   "servers": {
+    "omni-ui-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:9901/mcp"
+    },
     "kit-dev-mcp": {
       "type": "http",
       "url": "http://127.0.0.1:9902/mcp"
+    },
+    "usd-code-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:9903/mcp"
+    },
+    "isaacsim-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:9904/mcp"
     },
     "kit-lab-runtime": {
       "type": "http",
