@@ -12,6 +12,9 @@ tools:
   - browser
   - kit-dev-mcp/*
   - kit-lab-runtime/*
+  - omni-ui-mcp/*
+  - usd-code-mcp/*
+  - isaacsim-mcp/*
 agents:
   - KHL GLM Reviewer
 ---

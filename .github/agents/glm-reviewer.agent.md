@@ -9,6 +9,9 @@ tools:
   - search
   - web
   - kit-dev-mcp/*
+  - omni-ui-mcp/*
+  - usd-code-mcp/*
+  - isaacsim-mcp/*
   - kit-lab-runtime/kit_lifecycle_config
   - kit-lab-runtime/kit_lab_policy
   - kit-lab-runtime/kit_status
