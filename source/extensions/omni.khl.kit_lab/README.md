@@ -97,9 +97,10 @@ its active dependency closure are protected. Standalone self-disable is forbidde
 self-reload is restricted because no independent survivor owns re-enable.
 
 Profiler status observes only the already-loaded public Carbonite interface and the
-native save-profile setting. Bounded capture uses `IProfiler` plus `IProfileMonitor`, a
-unique marker, a 10-second hard input maximum, and exact mask/Python-flag restoration.
-It returns success only when bounded useful in-memory events contain the generated
-marker; installed interfaces are reported as requiring capture association rather than
-as proven support. Native file export, GPU, Tracy, external viewers and private
-profiler-window methods are unsupported.
+native save-profile setting. Bounded capture uses `IProfiler` plus `IProfileMonitor`,
+payload zones plus exactly one instant association token, a 10-second hard input
+maximum, deterministic fair cross-thread collection within existing bounds, and exact
+mask/Python-flag restoration. It returns success only when bounded useful in-memory
+events contain the dedicated association marker; that exact contract is reported as
+`available_verified_bounded_capture`. Native file export, GPU, Tracy, external viewers
+and private profiler-window methods are unsupported.

@@ -519,9 +519,10 @@ async def kit_experiment_note(
 async def kit_experiment_finish(
     summary: Annotated[str, Field(min_length=1, max_length=MAX_SUMMARY_CHARS)],
     outcome: Literal["success", "failed", "inconclusive", "cancelled"],
+    experiment_id: Annotated[str | None, Field(description="Expected active experiment ID for identity-safe finish; when supplied, must match the active ID or finish refuses without writing anything", max_length=96)] = None,
 ) -> dict[str, Any]:
-    """Finish the active experiment, write summary.md and clear the current pointer."""
-    return _experiment_result(lambda: experiments.finish(summary, outcome))
+    """Finish the active experiment, write summary.md and clear the current pointer. An optional expected experiment ID is validated atomically; mismatch refuses without any persistence mutation."""
+    return _experiment_result(lambda: experiments.finish(summary, outcome, experiment_id))
 
 
 @mcp.tool(title="Inspect Kit lifecycle configuration", **_tool_options("kit_lifecycle_config"))

@@ -242,10 +242,11 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
         explicit_authorization="Ask unless profiler runtime control and infrastructure output are authorized.",
         safer_alternative="kit_profiler_status",
         description=(
-            "Run a server-owned Carbonite CPU in-memory capture for at most 10 seconds, verify a unique "
-            "native event marker, restore exact prior mask/Python state, and persist bounded private evidence. "
-            "Optional Python instrumentation is part of the Carbonite trace, not cProfile .prof output. "
-            "No caller path, Tracy, GPU backend, external viewer, registry installation, or restart is used."
+            "Run a server-owned Carbonite CPU in-memory capture for at most 10 seconds, verify a dedicated "
+            "instant association token, restore exact prior mask/Python state, and persist bounded private "
+            "evidence. Optional Python instrumentation is part of the Carbonite trace, not cProfile .prof "
+            "output. No caller path, Tracy, GPU backend, external viewer, registry installation, or restart "
+            "is used."
         ),
         annotations=_annotations(read_only=False, destructive=True, idempotent=False),
     ),
@@ -386,6 +387,9 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
         safer_alternative="kit_experiment_current",
         description=(
             "Finish the active infrastructure-managed experiment, write its summary, and clear the "
+            "active pointer. An optional expected experiment ID, when supplied, is validated "
+            "atomically under the store lock; on mismatch the finish refuses without writing "
+            "summary.md, appending experiment_finished, changing the manifest, or clearing the "
             "active pointer. An explicit recorded-experiment task authorizes this action."
         ),
         annotations=_annotations(read_only=False, destructive=False, idempotent=False),

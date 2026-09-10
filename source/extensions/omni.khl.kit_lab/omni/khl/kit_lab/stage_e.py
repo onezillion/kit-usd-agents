@@ -38,9 +38,13 @@ PROFILER_SETTING_PATHS = (
     "/plugins/carb.profiler-cpu.plugin/compressProfile",
     "/plugins/carb.profiler-cpu.plugin/filePath",
 )
+# Promote only after the revised bounded-capture path is verified live. The name
+# stays explicit: bounded CPU capture with dedicated association-token evidence.
+VERIFIED_CAPTURE_CAPABILITY = "available_verified_bounded_capture"
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_.]+(?:-[A-Za-z][A-Za-z0-9_.]*)?$")
 _control_lock = asyncio.Lock()
 _capture_operations: dict[str, dict[str, Any]] = {}
+_capture_tasks: dict[str, asyncio.Task[Any]] = {}
 _bridge_generation: str | None = None
 
 
@@ -63,6 +67,7 @@ def start_bridge_generation() -> str:
     global _bridge_generation
     _bridge_generation = uuid.uuid4().hex
     _capture_operations.clear()
+    _capture_tasks.clear()
     return _bridge_generation
 
 
@@ -709,7 +714,7 @@ def profiler_status_impl() -> dict[str, Any]:
         capture_mask = int(interface.get_capture_mask())
         python_enabled = bool(interface.is_python_profiling_enabled())
     capture_active = bool(save_profile or capture_mask or python_enabled)
-    installed_state = "available_requires_capture_association" if profiler else "unknown"
+    installed_state = VERIFIED_CAPTURE_CAPABILITY if profiler else "unknown"
     return {
         "backend": "carb.profiler.cpu.in_memory" if profiler else None,
         "module_loaded": profiler is not None,
@@ -726,7 +731,7 @@ def profiler_status_impl() -> dict[str, Any]:
         "capabilities": {
             "cpu_events": installed_state,
             "bounded_capture": installed_state,
-            "python_instrumentation": "available_requires_capture_association" if profiler and hasattr(
+            "python_instrumentation": VERIFIED_CAPTURE_CAPABILITY if profiler and hasattr(
                 getattr(profiler, "IProfiler", None), "set_python_profiling_enabled"
             ) else "unknown",
             "native_file_export": "unsupported",
@@ -747,120 +752,172 @@ async def profiler_status() -> dict[str, Any]:
         return _failure("profiler.status", "PROFILER_STATUS_FAILED", f"{type(exc).__name__}: {exc}")
 
 
-def _flatten_events(
+def _bounded_head_tail(values: list[Any] | tuple[Any, ...], capacity: int) -> tuple[list[Any], bool]:
+    """Keep bounded evidence from both ends of a sequence.
+
+    The capture association token is emitted at the stop boundary, so a head-only
+    clamp can systematically discard it from a large completed-frame sequence.
+    """
+    if capacity <= 0:
+        return [], bool(values)
+    if len(values) <= capacity:
+        return list(values), False
+    head_count = capacity // 2
+    tail_count = capacity - head_count
+    return list(values[:head_count]) + list(values[-tail_count:]), True
+
+
+def _scan_thread_events(
     raw_events: Any,
-    marker: str,
-    *,
-    visit_limit: int = MAX_NATIVE_EVENTS_VISITED,
-    output_limit: int = MAX_CAPTURE_EVENTS,
-) -> tuple[list[dict[str, Any]], bool, int]:
-    bounded: list[dict[str, Any]] = []
-    marker_found = False
+    association_marker: str,
+    thread_id: int,
+    visit_limit: int,
+) -> dict[str, Any]:
+    """Breadth-first normalize one thread within visit_limit.
+
+    Association is exact-name equality only (`name == association_marker`), never a
+    substring/prefix/suffix match. The initial root enqueue is clamped so pending
+    work plus visited events never exceeds visit_limit; the nested-child queue is
+    clamped the same way; any dropped remainder sets traversal_truncated. Returns
+    visited count, one normalized association_event (or None), normalized payload
+    candidates in scan order, and whether traversal had to stop early.
+    """
     visited = 0
-    initial = raw_events if isinstance(raw_events, (list, tuple)) else []
-    # The association marker is emitted at the stop boundary. If a Python
-    # profile generated more roots than the parse budget, sample both ends so
-    # the recent boundary is not discarded merely because output is bounded.
-    if len(initial) > visit_limit and visit_limit > 1:
-        first_count = visit_limit // 2
-        queue = deque(islice(initial, first_count))
-        queue.extend(reversed(tuple(islice(reversed(initial), visit_limit - first_count))))
-    else:
-        queue = deque(islice(initial, visit_limit))
+    association_event = None
+    payload: list[dict[str, Any]] = []
+    traversal_truncated = False
+    roots = raw_events if isinstance(raw_events, (list, tuple)) else []
+    # Clamp the INITIAL root enqueue just like nested children: pending + visited
+    # must never exceed visit_limit; any root beyond the bound is dropped and marks
+    # traversal_truncated (same invariant the child clamp maintains).
+    initial, roots_truncated = _bounded_head_tail(roots, visit_limit)
+    traversal_truncated = traversal_truncated or roots_truncated
+    queue = deque(initial)
     while queue and visited < visit_limit:
         value = queue.popleft()
         visited += 1
         if not isinstance(value, dict):
             continue
         name = str(value.get("name", ""))
-        is_marker = marker in name
-        marker_found = marker_found or is_marker
         event = {
             key: value.get(key) for key in ("name", "duration", "indent", "threadId", "startTime")
             if key in value
         }
-        if len(bounded) < output_limit:
-            bounded.append(event)
-        elif is_marker and bounded:
-            bounded[-1] = event
+        event["profile_thread_id"] = thread_id
+        if name == association_marker and association_event is None:
+            association_event = event
+        else:
+            payload.append(event)
         children = value.get("children")
         if isinstance(children, (list, tuple)):
-            remaining = visit_limit - visited - len(queue)
-            if remaining > 0:
-                queue.extend(islice(children, remaining))
-    return bounded, marker_found, visited
+            # Clamp child enqueue so pending + taken never exceeds visit_limit;
+            # any child beyond the remaining budget is dropped and marks truncation.
+            remaining_slots = visit_limit - visited - len(queue)
+            selected, children_truncated = _bounded_head_tail(children, remaining_slots)
+            queue.extend(selected)
+            traversal_truncated = traversal_truncated or children_truncated
+    if queue:
+        traversal_truncated = True
+    return {
+        "events_visited": visited,
+        "association_event": association_event,
+        "payload": payload,
+        "traversal_truncated": traversal_truncated,
+    }
 
 
-def _collect_events(snapshot: Any, marker: str) -> dict[str, Any]:
-    advertised_thread_ids = tuple(snapshot.get_profile_thread_ids())
-    thread_ids = [int(value) for value in islice(advertised_thread_ids, MAX_PROFILE_THREADS)]
+def _fair_collect(payload_lists: list[list[dict[str, Any]]], capacity: int) -> list[dict[str, Any]]:
+    """Deterministic round-robin selection across per-thread payload lists.
+
+    Prevents the first/thread-0 thread from monopolizing the bounded output while
+    preserving scan order within each thread. No thread is pre-truncated; the
+    global capacity is the only limit (existing MAX_CAPTURE_EVENTS).
+    """
+    if capacity <= 0:
+        return []
+    heads = [0] * len(payload_lists)
+    result: list[dict[str, Any]] = []
+    active = True
+    while active and len(result) < capacity:
+        active = False
+        for index, rows in enumerate(payload_lists):
+            if len(result) >= capacity:
+                break
+            if heads[index] < len(rows):
+                result.append(rows[heads[index]])
+                heads[index] += 1
+                active = True
+    return result
+
+
+def _collect_events(snapshot: Any, association_marker: str) -> dict[str, Any]:
+    # Inspect at most one ID beyond the bound. Prioritize the main thread because
+    # the association token is emitted by the capture operation there, without
+    # allowing that priority to expand the global thread bound.
+    advertised_sample = [
+        int(value) for value in islice(snapshot.get_profile_thread_ids(), MAX_PROFILE_THREADS + 1)
+    ]
     main_thread_id = int(snapshot.get_main_thread_id())
-    ordered_thread_ids = []
-    for thread_id in (main_thread_id, *thread_ids):
-        if thread_id not in ordered_thread_ids:
+    ordered_thread_ids = [main_thread_id]
+    for thread_id in advertised_sample:
+        if thread_id not in ordered_thread_ids and len(ordered_thread_ids) < MAX_PROFILE_THREADS:
             ordered_thread_ids.append(thread_id)
+    threads_truncated = (
+        len(advertised_sample) > MAX_PROFILE_THREADS
+        or any(thread_id not in ordered_thread_ids for thread_id in advertised_sample)
+    )
 
-    bounded: list[dict[str, Any]] = []
-    scanned: list[dict[str, int]] = []
     visited = 0
-    marker_thread_id = None
+    association_event = None
+    association_thread_id = None
+    per_thread_payload: list[list[dict[str, Any]]] = []
+    scanned: list[dict[str, int]] = []
+    traversal_truncated = False
+    # One config-equivalent allocation per thread (same as prior); scanning does
+    # NOT stop early merely because association was found on an early thread.
     for index, thread_id in enumerate(ordered_thread_ids):
         remaining_visits = MAX_NATIVE_EVENTS_VISITED - visited
         if remaining_visits <= 0:
             break
         remaining_threads = len(ordered_thread_ids) - index
         thread_visit_limit = max(1, remaining_visits // remaining_threads)
-        available_output = MAX_CAPTURE_EVENTS - len(bounded)
         raw = snapshot.get_profile_events(thread_id)
-        events, found, count = _flatten_events(
-            raw,
-            marker,
-            visit_limit=thread_visit_limit,
-            output_limit=max(1, available_output),
-        )
-        for event in events:
-            event.setdefault("profile_thread_id", thread_id)
-        if available_output > 0:
-            bounded.extend(events[:available_output])
-        elif found and bounded:
-            marker_event = next(
-                (event for event in reversed(events) if marker in str(event.get("name", ""))),
-                None,
-            )
-            if marker_event is not None:
-                bounded[-1] = marker_event
-        visited += count
-        scanned.append({"thread_id": thread_id, "event_count": len(raw), "events_visited": count})
-        if found:
-            marker_thread_id = thread_id
-            break
+        scan = _scan_thread_events(raw, association_marker, thread_id, thread_visit_limit)
+        visited += scan["events_visited"]
+        per_thread_payload.append(scan["payload"])
+        traversal_truncated = traversal_truncated or scan["traversal_truncated"]
+        scanned.append({"thread_id": thread_id, "events_visited": scan["events_visited"]})
+        if scan["association_event"] is not None and association_event is None:
+            association_event = scan["association_event"]
+            association_thread_id = thread_id
 
+    payload_capacity = (MAX_CAPTURE_EVENTS - 1) if association_event is not None else MAX_CAPTURE_EVENTS
+    payload = _fair_collect(per_thread_payload, payload_capacity)
+    output_truncated = (sum(len(rows) for rows in per_thread_payload) > len(payload))
+    events = ([association_event] + payload) if association_event is not None else payload
     return {
-        "events": bounded,
-        "marker_found": marker_thread_id is not None,
-        "marker_thread_id": marker_thread_id,
+        "events": events,
+        "association_found": association_event is not None,
+        "association_event": association_event,
+        "association_marker": association_marker,
+        "association_thread_id": association_thread_id,
         "events_visited": visited,
         "threads_scanned": scanned,
-        "thread_ids": thread_ids,
+        "thread_ids": ordered_thread_ids,
         "main_thread_id": main_thread_id,
-        "threads_truncated": len(advertised_thread_ids) > len(thread_ids),
+        "threads_truncated": threads_truncated,
+        "traversal_truncated": traversal_truncated,
+        "output_truncated": output_truncated,
+        "events_truncated": threads_truncated or traversal_truncated or output_truncated,
     }
 
 
-async def _capture(request: ProfilerCaptureRequest) -> dict[str, Any]:
-    operation = {
-        "capture_id": request.capture_id,
-        "experiment_id": request.experiment_id,
-        "phase": "BASELINE",
-        "phase_history": [],
-        "requested_duration_seconds": request.duration_seconds,
-        "python_profile_requested": request.python_profile,
-        "bridge_generation": _bridge_generation,
-        "process": {"pid": os.getpid()},
-        "started_monotonic": time.monotonic(),
-    }
-    _capture_operations[request.capture_id] = operation
-    marker = f"KHL_STAGE_E_{request.capture_id}"
+async def _capture(request: ProfilerCaptureRequest, operation: dict[str, Any]) -> dict[str, Any]:
+    # `operation` is the reservation created atomically by profiler_capture() before
+    # the task was scheduled; keep it as the single durable record.
+    operation["phase"] = "BASELINE"
+    association_marker = f"KHL_CAPTURE_ASSOC_{request.capture_id}"
+    payload_marker = f"KHL_CAPTURE_PAYLOAD_{request.capture_id}"
     profiler = None
     baseline_mask = None
     expected_mask = None
@@ -913,7 +970,7 @@ async def _capture(request: ProfilerCaptureRequest) -> dict[str, Any]:
             frames = 0
             checksum = 0
             while time.monotonic() < deadline:
-                profiler.begin(PROFILE_MASK, marker)
+                profiler.begin(PROFILE_MASK, payload_marker)
                 try:
                     checksum = sum((value * 17) % 97 for value in range(256))
                 finally:
@@ -925,40 +982,53 @@ async def _capture(request: ProfilerCaptureRequest) -> dict[str, Any]:
                 await asyncio.wait_for(omni.kit.app.get_app().next_update_async(), min(1.0, remaining + 0.1))
             _phase(operation, "STOPPING")
             # IProfileMonitor defines get_last_profile_events() relative to the
-            # previous explicit mark_frame_end(). Emit the association marker
-            # immediately before that native completion boundary.
-            profiler.begin(PROFILE_MASK, marker)
+            # previous explicit mark_frame_end(). Emit the association token as an
+            # exact instant immediately before that native completion boundary.
+            # Measured on Kit 110.1.3 (carb.profiler.cpu.in_memory): when Python
+            # instrumentation is enabled, begin/end zones do not appear in the
+            # completed-frame snapshot, while instant events still do. Keep the
+            # payload zone, and additionally emit a unique instant token, so capture
+            # ID association holds even when python_profile is requested.
+            profiler.begin(PROFILE_MASK, payload_marker)
             try:
                 checksum = sum((value * 19) % 101 for value in range(256))
             finally:
                 profiler.end(PROFILE_MASK)
+            profiler.instant(PROFILE_MASK, carb.profiler.InstantType.THREAD, association_marker)
             frames += 1
             monitor.mark_frame_end()
             events = monitor.get_last_profile_events()
-            collected = _collect_events(events, marker)
+            collected = _collect_events(events, association_marker)
             _phase(operation, "FINALIZING")
             operation["association_scan"] = {
-                key: collected[key]
-                for key in ("marker_thread_id", "threads_scanned", "events_visited", "threads_truncated")
+                "association_thread_id": collected["association_thread_id"],
+                "threads_scanned": collected["threads_scanned"],
+                "events_visited": collected["events_visited"],
+                "threads_truncated": collected["threads_truncated"],
             }
-            if not collected["marker_found"]:
-                raise RuntimeError("CAPTURE_ASSOCIATION_FAILED: unique marker was absent from native events")
+            if not collected["association_found"]:
+                raise RuntimeError("CAPTURE_ASSOCIATION_FAILED: unique association token was absent from native events")
             operation.update({
                 "backend": "carb.profiler.cpu.in_memory",
                 "mode": "cpu_python" if request.python_profile else "cpu",
-                "marker": marker,
-                "marker_found": collected["marker_found"],
-                "marker_thread_id": collected["marker_thread_id"],
+                "marker": association_marker,
+                "marker_found": collected["association_found"],
+                "association_found": collected["association_found"],
+                "association_marker": collected["association_marker"],
+                "association_thread_id": collected["association_thread_id"],
+                "marker_thread_id": collected["association_thread_id"],
                 "frames_observed": frames,
                 "workload_checksum": checksum,
                 "thread_ids": collected["thread_ids"],
                 "main_thread_id": collected["main_thread_id"],
                 "threads_scanned": collected["threads_scanned"],
                 "threads_truncated": collected["threads_truncated"],
+                "traversal_truncated": collected["traversal_truncated"],
+                "output_truncated": collected["output_truncated"],
+                "events_truncated": collected["events_truncated"],
                 "events": collected["events"],
                 "events_returned": len(collected["events"]),
                 "events_visited": collected["events_visited"],
-                "events_truncated": collected["events_visited"] > len(collected["events"]),
                 "native_output": None,
                 "native_file_export": "unsupported",
                 "observed_duration_seconds": time.monotonic() - started,
@@ -1018,9 +1088,37 @@ async def _capture(request: ProfilerCaptureRequest) -> dict[str, Any]:
 
 
 async def profiler_capture(request: ProfilerCaptureRequest) -> dict[str, Any]:
+    # Atomically reserve the capture ID before creating any task so two concurrent
+    # same-ID requests cannot both pass the duplicate check (single event loop, no
+    # need for an additional lock).
     if request.capture_id in _capture_operations:
         return _failure("profiler.capture", "DUPLICATE_CAPTURE_ID", "Capture ID already exists")
-    task = asyncio.create_task(_capture(request), name=f"kit-lab-profile-{request.capture_id}")
+    _capture_operations[request.capture_id] = {
+        "capture_id": request.capture_id,
+        "experiment_id": request.experiment_id,
+        "phase": "RESERVED",
+        "phase_history": [],
+        "requested_duration_seconds": request.duration_seconds,
+        "python_profile_requested": request.python_profile,
+        "bridge_generation": _bridge_generation,
+        "process": {"pid": os.getpid()},
+        "started_monotonic": time.monotonic(),
+    }
+    operation = _capture_operations[request.capture_id]
+    capture_coro = _capture(request, operation)
+    try:
+        task = asyncio.create_task(capture_coro, name=f"kit-lab-profile-{request.capture_id}")
+    except Exception:
+        capture_coro.close()
+        _capture_operations.pop(request.capture_id, None)
+        raise
+    _capture_tasks[request.capture_id] = task
+
+    def release_task(completed: asyncio.Task[Any]) -> None:
+        if _capture_tasks.get(request.capture_id) is completed:
+            _capture_tasks.pop(request.capture_id, None)
+
+    task.add_done_callback(release_task)
     if len(_capture_operations) > 128:
         completed = [
             key for key, value in _capture_operations.items()

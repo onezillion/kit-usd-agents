@@ -698,7 +698,12 @@ class ExperimentStore:
             return value
         return value[:maximum] + "…"
 
-    def finish(self, summary: str, outcome: str) -> dict[str, Any]:
+    def finish(
+        self,
+        summary: str,
+        outcome: str,
+        expected_experiment_id: str | None = None,
+    ) -> dict[str, Any]:
         summary = _require_text(summary, "summary", MAX_SUMMARY_CHARS)
         if outcome not in OUTCOMES:
             raise ExperimentValidationError(
@@ -708,6 +713,15 @@ class ExperimentStore:
             experiment_id = self._current_id_locked()
             if experiment_id is None:
                 raise ExperimentConflictError("No experiment is active")
+            # Identity-safe finish: an expected ID, when supplied, must equal the
+            # current ID atomically under this lock before any write. On mismatch
+            # we refuse WITHOUT writing summary.md, appending experiment_finished,
+            # changing the manifest, or clearing current.json.
+            if expected_experiment_id is not None and expected_experiment_id != experiment_id:
+                raise ExperimentConflictError(
+                    f"Expected experiment ID {expected_experiment_id} does not match active "
+                    f"experiment {experiment_id}"
+                )
             sequence, manifest = self._reserve_sequence_locked(experiment_id)
             directory = self._experiment_dir(experiment_id)
             completed_at = utc_now()

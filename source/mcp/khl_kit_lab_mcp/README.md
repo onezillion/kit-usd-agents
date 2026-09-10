@@ -65,7 +65,7 @@ The server exposes one policy through four synchronized surfaces:
 - the read-only `kit_lab_policy` tool;
 - [`MCP_POLICY.md`](MCP_POLICY.md), the repo-local human-readable manual.
 
-Policy fingerprint: `3868204d36842ed9`
+Policy fingerprint: `ede1091e6368cf82`
 
 Read-only context inspection is allowed freely. Develop reusable installed-version
 Kit/USD scripts, extensions, and scripting-component source through authorized Python.
@@ -148,14 +148,74 @@ reloadability and the Kit Lab protection closure. Enable/disable/reload are loca
 serialized with lifecycle mutation, and never install, cascade, change search paths, or
 restart Kit. Kit Lab self-disable is forbidden and self-reload is explicitly restricted.
 
-`kit_profiler_status` reports already-loaded Carbonite availability without mutation and
-does not claim support until a capture has supplied associated events.
-`kit_profiler_capture` runs for 10 seconds or less, requires a generated marker in native
-in-memory CPU events before returning success, and restores prior capture mask/Python instrumentation. Optional
-Python instrumentation is Carbonite trace data, not a cProfile `.prof` file. Bounded JSON
-evidence is placed in a generated private directory below `KIT_LAB_PROFILE_ROOT`;
-callers cannot choose paths. Native profiler file export, GPU capture, Tracy, external
-viewers and profiler-extension installation are unsupported by this surface.
+`kit_profiler_status` reports already-loaded Carbonite availability without mutation.
+`kit_profiler_capture` runs for 10 seconds or less, emits profiler payload zones plus
+exactly one instant association token before `mark_frame_end()`, requires that exact
+token in native in-memory CPU events before returning success, deterministically
+collects bounded payload fairly across scanned threads, and restores prior capture
+mask/Python instrumentation. Optional Python instrumentation is Carbonite trace data,
+not a cProfile `.prof` file. Its capability is reported as
+`available_verified_bounded_capture`. Bounded JSON evidence is placed in a generated
+private directory below `KIT_LAB_PROFILE_ROOT`; callers cannot choose paths. Native
+profiler file export, GPU capture, Tracy, external viewers and profiler-extension
+installation are unsupported by this surface.
+
+## Experiment records and operator recovery
+
+`kit_experiment_finish` accepts an optional `experiment_id`. When supplied, the store
+validates it atomically under the store lock against the active experiment; mismatch
+refuses without writing `summary.md`, appending `experiment_finished`, changing the
+manifest, or clearing the active pointer. Callers may omit it for the legacy behavior.
+
+For a rare operational situation where a correctly-authorized agent cannot make the
+tool call itself, the small helper `experiment-user-local.sh` provides operator
+recovery through the SAME normal MCP tools only:
+
+```bash
+source/mcp/khl_kit_lab_mcp/experiment-user-local.sh current
+source/mcp/khl_kit_lab_mcp/experiment-user-local.sh get <experiment-id>
+source/mcp/khl_kit_lab_mcp/experiment-user-local.sh finish --expect-id <experiment-id> <outcome> "<summary>"
+source/mcp/khl_kit_lab_mcp/experiment-user-local.sh start <title> <objective> <tag[,tag,...]>
+```
+
+It is **operator recovery only**:
+- **not** an allowlist bypass;
+- read-only reviewers must never use shell execution to gain experiment mutation;
+- a manager/operator may use it only when the task explicitly authorizes experiment
+  recovery and the shell/process authority is available.
+
+It invokes only the same normal MCP tools the agent surface uses
+(`kit_experiment_current`, `kit_experiment_get`, `kit_experiment_start`,
+`kit_experiment_finish`), always passes `--expect-id` to `finish`, returns nonzero
+on mismatch/inactive/failure/malformed result, applies the same typed/bounded
+input contract as the MCP schema, exposes no free-form note operation, and never
+touches `manifest.json`, `events.jsonl`, `summary.md`, or `current.json` directly.
+Argument counts are enforced exactly; extra or missing arguments refuse with a
+nonzero exit.
+
+## Kit restart versus Kit Lab MCP restart
+
+The Kit Lab MCP daemon (`khl_kit_lab_mcp.server`) keeps no persistent upstream
+connection to Kit. Every `KitLabClient` call issues a fresh request to
+`http://127.0.0.1:8011`, so the daemon does not need to be restarted when Kit is
+restarted for any reason that does not itself change the daemon.
+
+- **Bridge source change** (files under `source/extensions/omni.khl.kit_lab`, e.g.,
+  the profiler bridge `stage_e.py`) requires a bridge/Kit activation: a graceful
+  `lifecycle-user-local.sh restart` of the identified Kit so the new bridge code is
+  loaded. After the activation, calling any bridge-backed tool through the SAME
+  already-running Kit Lab MCP daemon still works; no MCP restart is needed.
+- **Kit Lab MCP Python/policy change** (files under
+  `source/mcp/khl_kit_lab_mcp/src/khl_kit_lab_mcp`, e.g., `server.py`, `policy.py`,
+  `experiments.py`) requires restarting only the Kit Lab MCP daemon.
+- **Changes to both** require both activations: the bridge code must be loaded by
+  Kit, and the daemon must run the new policy/server implementation.
+- A transient convenience restart of a single stale in-flight request handler
+  during shutdown is an expected transient, not shipped behavior, and is documented
+  here because it does not imply any MCP restart requirement.
+
+This follows from `client.py` using fresh stateless HTTP per call rather than a
+persistent connection that could become stale against the old Kit process.
 
 ## Install and static tests
 

@@ -326,7 +326,8 @@ async def stage_e_profiler_verification(endpoint: str) -> None:
         result = payload(await client.call_tool(
             "kit_profiler_capture", {"duration_seconds": 1.0, "python_profile": True}))["result"]
         capture_id = result["capture_id"]
-        if not result.get("marker_found") or not result.get("restoration", {}).get("complete"):
+        if not (result.get("marker_found") or result.get("association_found")) \
+                or not result.get("restoration", {}).get("complete"):
             raise SystemExit(f"Profiler capture lacked associated events/restoration: {result}")
         evidence = payload(await client.call_tool(
             "kit_profiler_capture_status", {"capture_id": capture_id}))

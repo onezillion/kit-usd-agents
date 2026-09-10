@@ -129,6 +129,13 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("  - kit-lab-runtime/*", primary)
         self.assertNotIn("  - edit", primary)
 
+        manager = (ROOT / ".github/agents/kimi-manager.agent.md").read_text()
+        manager_allowlist = set(re.findall(
+            r"^  - kit-lab-runtime/(.+)$", manager, re.MULTILINE))
+        self.assertNotIn("*", manager_allowlist)
+        self.assertEqual(manager_allowlist, expected)
+        self.assertIn("  - kit-lab-runtime/kit_experiment_note", manager)
+
     def test_wrappers_are_local_only_and_disable_usage_logging(self) -> None:
         for service in SERVICES.values():
             wrapper = ROOT / service["wrapper"]

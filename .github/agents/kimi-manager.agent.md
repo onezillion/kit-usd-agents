@@ -13,7 +13,33 @@ tools:
   - browser
   - vscode
   - kit-dev-mcp/*
-  - kit-lab-runtime/*
+  - kit-lab-runtime/kit_lab_policy
+  - kit-lab-runtime/kit_lab_status
+  - kit-lab-runtime/kit_runtime_info
+  - kit-lab-runtime/kit_stage_summary
+  - kit-lab-runtime/kit_extensions_list
+  - kit-lab-runtime/kit_extension_inspect
+  - kit-lab-runtime/kit_extension_enable
+  - kit-lab-runtime/kit_extension_disable
+  - kit-lab-runtime/kit_extension_reload
+  - kit-lab-runtime/kit_profiler_status
+  - kit-lab-runtime/kit_profiler_capture
+  - kit-lab-runtime/kit_profiler_capture_status
+  - kit-lab-runtime/kit_viewport_info
+  - kit-lab-runtime/kit_execute_python
+  - kit-lab-runtime/kit_reset_python_session
+  - kit-lab-runtime/kit_experiment_start
+  - kit-lab-runtime/kit_experiment_current
+  - kit-lab-runtime/kit_experiment_list
+  - kit-lab-runtime/kit_experiment_note
+  - kit-lab-runtime/kit_experiment_get
+  - kit-lab-runtime/kit_experiment_finish
+  - kit-lab-runtime/kit_lifecycle_config
+  - kit-lab-runtime/kit_status
+  - kit-lab-runtime/kit_start
+  - kit-lab-runtime/kit_stop
+  - kit-lab-runtime/kit_restart
+  - kit-lab-runtime/kit_log_paths
   - omni-ui-mcp/*
   - usd-code-mcp/*
   - isaacsim-mcp/*
@@ -109,6 +135,40 @@ Use the available tools according to the task:
 - use terminal execution for builds, tests, diagnostics, and repository operations;
 - use `kit-dev-mcp` for NVIDIA documentation/knowledge;
 - use `kit-lab-runtime` for live Kit work.
+
+## Tool-dispatch loop guard
+
+`kit_experiment_note` is intentionally exposed to this manager as a legitimate bounded
+experiment-journal operation. Controlled fresh-session tests routed all intended tools
+correctly, and a deliberately requested note produced exactly one note call; false note
+triggering was not reproduced. Historical wrong-tool dispatch loops remain valid
+evidence, but their exact context-dependent cause is unresolved and must not be
+attributed to NOTE itself.
+
+If your EXPECTED_TOOL differs from the confirmed ACTUAL_TOOL of the call you just
+intended to make (or that the runtime executed on your behalf), you are in a
+tool-dispatch mismatch. This guard exists to prevent the note/tool-call narration
+loop documented in earlier profiler work.
+
+On the first confirmed mismatch:
+
+1. **stop that tool-call branch immediately**; do not emit any further "about to
+   call", "now calling", "STOP", "END", "final", or similar experiment notes or
+   narration of the same intent;
+2. **do not** keep calling a near-by tool (for example `kit_experiment_note`)
+   merely because the expected tool did not execute;
+3. **report** to the operator in one compact block the exact:
+   - EXPECTED_TOOL
+   - ACTUAL_TOOL
+   - REQUIRED_OPERATOR_ACTION
+4. **then** either proceed on a genuinely different next action, or stop that
+   branch if no safe alternative exists.
+
+For experiment-lifecycle recovery specifically, the allowed operator recovery is
+the wrapper `source/mcp/khl_kit_lab_mcp/experiment-user-local.sh`, but it may be
+used only when the current job explicitly authorizes experiment recovery and the
+shell/process authority is available. It is not an allowlist bypass; a read-only
+reviewer must never use shell execution to gain experiment mutation.
 
 Develop and debug installed-version Kit/USD Python that can become a reusable
 script, extension, or scripting-component source. MCP shortcut success does not

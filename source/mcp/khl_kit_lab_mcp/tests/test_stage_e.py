@@ -307,17 +307,73 @@ class FakeSettings:
 
 
 class FakeEvents:
-    def __init__(self, profiler):
-        self.profiler = profiler
+    """Per-thread snapshot matching the installed ProfileEvents contract.
+
+    Deterministic shape only: a mapping from thread_id to that frame's rows, with a
+    browser-style main thread. No cross-frame accumulation happens here.
+    """
+
+    def __init__(self, rows_by_thread, main_thread_id=11):
+        self.rows = {int(t): tuple(r) for t, r in rows_by_thread.items()}
+        self.main = int(main_thread_id)
 
     def get_profile_thread_ids(self):
-        return (11,)
+        return tuple(self.rows)
 
     def get_main_thread_id(self):
-        return 11
+        return self.main
 
     def get_profile_events(self, thread_id=0):
-        return tuple(self.profiler.events)
+        return tuple(self.rows.get(thread_id, ()))
+
+
+class FakeProfiler:
+    """Configurable profiler fake modeling measured Kit 110.1.3 application contracts.
+
+    Configurable rather than universal so the tests can express exactly which
+    measured surface each case relies on:
+      zones_visible_when_python: begin/end zones land in the completed-frame
+        snapshot under Python instrumentation (False = measured suppression);
+      instants_visible: instant events land in that snapshot (True = measured);
+    Per-frame: mark_frame_end() publishes only the current frame's events and
+    never re-publishes them.
+    """
+
+    def __init__(self, *, zones_visible_when_python=False, instants_visible=True):
+        self.mask = 0
+        self.python = False
+        self.zones_visible_when_python = zones_visible_when_python
+        self.instants_visible = instants_visible
+        self.frame_events = []
+        self.published = ()
+        self.main_thread = 11
+
+    def get_capture_mask(self): return self.mask
+    def set_capture_mask(self, value): self.mask = value
+    def is_python_profiling_enabled(self): return self.python
+    def set_python_profiling_enabled(self, value): self.python = value
+    def ensure_thread(self): pass
+
+    def begin(self, mask, name):
+        if (not self.python) or self.zones_visible_when_python:
+            self.frame_events.append({"name": name, "duration": 0.1, "indent": 0, "threadId": self.main_thread})
+
+    def end(self, mask): pass
+
+    def instant(self, mask, instant_type, name):
+        if self.instants_visible:
+            self.frame_events.append({"name": name, "duration": 0.0, "indent": 0, "threadId": self.main_thread})
+
+    def mark_frame_end(self):
+        self.published = tuple(self.frame_events)
+        self.frame_events = []
+
+    def last_events(self):
+        return self.published
+
+    @property
+    def events(self):
+        return list(self.published) + list(self.frame_events)
 
 
 class FakeMonitor:
@@ -327,29 +383,17 @@ class FakeMonitor:
 
     def mark_frame_end(self):
         self.marked = True
+        self.profiler.mark_frame_end()
 
     def get_last_profile_events(self):
-        return FakeEvents(self.profiler)
-
-
-class FakeProfiler:
-    def __init__(self):
-        self.mask = 0
-        self.python = False
-        self.events = []
-
-    def get_capture_mask(self): return self.mask
-    def set_capture_mask(self, value): self.mask = value
-    def is_python_profiling_enabled(self): return self.python
-    def set_python_profiling_enabled(self, value): self.python = value
-    def ensure_thread(self): pass
-    def begin(self, mask, name): self.events.append({"name": name, "duration": 0.1, "indent": 0})
-    def end(self, mask): pass
+        rows = {profiler.main_thread: profiler.last_events()} if (profiler := self.profiler) else {}
+        return FakeEvents(rows, main_thread_id=self.profiler.main_thread)
 
 
 class ProfilerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         stage_e._capture_operations.clear()
+        stage_e._capture_tasks.clear()
 
     def test_association_scans_non_main_threads_with_global_bounds(self):
         marker = "KHL_STAGE_E_non_main"
@@ -370,12 +414,404 @@ class ProfilerTests(unittest.IsolatedAsyncioTestCase):
                 return self.rows[thread_id]
 
         result = stage_e._collect_events(ThreadedEvents(), marker)
-        self.assertTrue(result["marker_found"])
-        self.assertEqual(result["marker_thread_id"], 22)
+        self.assertTrue(result["association_found"])
+        self.assertEqual(result["association_thread_id"], 22)
         self.assertEqual(len(result["events"]), stage_e.MAX_CAPTURE_EVENTS)
-        self.assertEqual(result["events"][-1]["name"], marker)
+        # The dedicated association token is preserved first, not an arbitrary event.
+        self.assertEqual(result["events"][0]["name"], marker)
+        # The main thread must not monopolize all 512 slots; thread 22 keeps representation.
+        self.assertTrue(any(row.get("profile_thread_id") == 22 for row in result["events"]))
         self.assertLessEqual(result["events_visited"], stage_e.MAX_NATIVE_EVENTS_VISITED)
         self.assertEqual([row["thread_id"] for row in result["threads_scanned"]], [11, 22])
+
+    def test_association_exact_match_rejects_collisions(self):
+        class Ev:
+            rows = {11: ({"name": "KHL_CAPTURE_ASSOC_aaaa_extra"},)}
+
+            def get_profile_thread_ids(self): return (11,)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), "KHL_CAPTURE_ASSOC_aaaa")
+        self.assertFalse(result["association_found"], "substring match must not count as exact association")
+        self.assertIsNone(result["association_thread_id"])
+
+    def test_thread_count_truncation_is_distinct(self):
+        class Ev:
+            rows = {11: ({"name": "m"},)}
+
+            def get_profile_thread_ids(self): return tuple(range(stage_e.MAX_PROFILE_THREADS + 1))
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(11, ())
+
+        result = stage_e._collect_events(Ev(), "absent-marker")
+        self.assertTrue(result["threads_truncated"])
+        self.assertFalse(result["output_truncated"])
+        self.assertFalse(result["traversal_truncated"])
+        self.assertTrue(result["events_truncated"])
+
+    def test_output_truncation_does_not_set_thread_truncation(self):
+        # Two threads producing more payload than MAX_CAPTURE_EVENTS output slots.
+        class Ev:
+            rows = {
+                11: tuple({"name": f"m{i}"} for i in range(stage_e.MAX_CAPTURE_EVENTS)),
+                22: tuple({"name": f"n{i}"} for i in range(stage_e.MAX_CAPTURE_EVENTS)),
+            }
+
+            def get_profile_thread_ids(self): return (11, 22)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), "absent-marker")
+        self.assertFalse(result["threads_truncated"])
+        self.assertTrue(result["output_truncated"])
+        self.assertTrue(result["events_truncated"])
+
+    def test_collect_does_not_republish_across_frames(self):
+        class Ev:
+            def __init__(self):
+                self.rows = {11: ({"name": "old-marker"},), 22: ({"name": "fresh"},)}
+
+            def get_profile_thread_ids(self): return (11, 22)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        events = Ev()
+        first = stage_e._collect_events(events, "old-marker")
+        self.assertTrue(first["association_found"])
+        self.assertEqual(first["association_thread_id"], 11)
+        # Simulate the monitor publishing a fresh frame with different content.
+        events.rows = {11: ({"name": "fresh"},), 22: ({"name": "newer"},)}
+        fresh = stage_e._collect_events(events, "absent-marker")
+        self.assertFalse(fresh["association_found"])
+        self.assertIsNone(fresh["association_thread_id"])
+
+    def test_main_thread_is_prioritized_without_expanding_thread_bound(self):
+        # Adversarial: MAX_PROFILE_THREADS bound excludes the main thread id.
+        many = stage_e.MAX_PROFILE_THREADS
+        class Ev:
+            rows = {tid: ({"name": f"t{tid}"},) for tid in range(1, many + 1)}
+            rows[999999] = ({"name": "KHL_CAPTURE_ASSOC_x"},)
+
+            def get_profile_thread_ids(self): return (tuple(range(1, many + 1)) + (999999,))
+
+            def get_main_thread_id(self): return 999999
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), "KHL_CAPTURE_ASSOC_x")
+        # Global thread bound holds while the main thread remains first because
+        # it owns the stop-boundary association token.
+        self.assertTrue(result["threads_truncated"])
+        self.assertTrue(result["association_found"])
+        self.assertLessEqual(len(result["threads_scanned"]), stage_e.MAX_PROFILE_THREADS)
+        self.assertEqual(result["threads_scanned"][0]["thread_id"], 999999)
+
+    def test_advertised_thread_iterator_is_consumed_only_to_bound_plus_one(self):
+        consumed = 0
+
+        class Ev:
+            def get_profile_thread_ids(self):
+                nonlocal consumed
+                for thread_id in range(stage_e.MAX_PROFILE_THREADS + 1):
+                    consumed += 1
+                    yield thread_id
+                raise AssertionError("collector consumed beyond the bounded sample")
+
+            def get_main_thread_id(self): return 0
+
+            def get_profile_events(self, thread_id=0): return ()
+
+        result = stage_e._collect_events(Ev(), "absent-marker")
+        self.assertTrue(result["threads_truncated"])
+        self.assertEqual(consumed, stage_e.MAX_PROFILE_THREADS + 1)
+        self.assertLessEqual(len(result["threads_scanned"]), stage_e.MAX_PROFILE_THREADS)
+
+    def test_oversized_children_are_bounded_and_mark_traversal_truncated(self):
+        class Ev:
+            root = {
+                "name": "root",
+                "children": tuple({"name": f"c{i}"} for i in range(50_000)),
+            }
+            rows = {11: (root,)}
+
+            def get_profile_thread_ids(self): return (11,)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), "absent-marker")
+        self.assertTrue(result["traversal_truncated"])
+        # Bounded by the global visit budget, not by the oversized child collection.
+        self.assertLessEqual(result["events_visited"], stage_e.MAX_NATIVE_EVENTS_VISITED)
+        # Root plus clamped children should be bounded well below 50_000.
+        self.assertLess(result["events_visited"], 50_000)
+
+    def test_oversized_root_events_are_bounded_and_mark_traversal_truncated(self):
+        # Adversarial: more initial root events than visit_limit.
+        class Ev:
+            rows = {11: tuple({"name": f"r{i}"} for i in range(50_000))}
+
+            def get_profile_thread_ids(self): return (11,)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), "absent-marker")
+        self.assertTrue(result["traversal_truncated"])
+        self.assertLessEqual(result["events_visited"], stage_e.MAX_NATIVE_EVENTS_VISITED)
+        self.assertLess(result["events_visited"], 50_000,
+                        "initial root enqueue must be clamped by the same visit budget")
+
+    def test_stop_boundary_association_survives_oversized_root_sequence(self):
+        marker = "KHL_CAPTURE_ASSOC_tail"
+
+        class Ev:
+            rows = {
+                11: tuple(
+                    {"name": marker if index == 49_999 else f"r{index}"}
+                    for index in range(50_000)
+                )
+            }
+
+            def get_profile_thread_ids(self): return (11,)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), marker)
+        self.assertTrue(result["association_found"])
+        self.assertTrue(result["traversal_truncated"])
+        self.assertLessEqual(result["events_visited"], stage_e.MAX_NATIVE_EVENTS_VISITED)
+
+    def test_stop_boundary_association_survives_oversized_child_sequence(self):
+        marker = "KHL_CAPTURE_ASSOC_child_tail"
+
+        class Ev:
+            rows = {
+                11: ({
+                    "name": "root",
+                    "children": tuple(
+                        {"name": marker if index == 49_999 else f"c{index}"}
+                        for index in range(50_000)
+                    ),
+                },)
+            }
+
+            def get_profile_thread_ids(self): return (11,)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), marker)
+        self.assertTrue(result["association_found"])
+        self.assertTrue(result["traversal_truncated"])
+        self.assertLessEqual(result["events_visited"], stage_e.MAX_NATIVE_EVENTS_VISITED)
+
+    def test_exact_association_survives_full_output(self):
+        class Ev:
+            rows = {
+                11: tuple({"name": f"m{i}"} for i in range(stage_e.MAX_CAPTURE_EVENTS)),
+                22: ({"name": "KHL_CAPTURE_ASSOC_full"},),
+            }
+
+            def get_profile_thread_ids(self): return (11, 22)
+
+            def get_main_thread_id(self): return 11
+
+            def get_profile_events(self, thread_id=0): return self.rows.get(thread_id, ())
+
+        result = stage_e._collect_events(Ev(), "KHL_CAPTURE_ASSOC_full")
+        self.assertTrue(result["association_found"])
+        self.assertEqual(result["events"][0]["name"], "KHL_CAPTURE_ASSOC_full")
+        self.assertLessEqual(len(result["events"]), stage_e.MAX_CAPTURE_EVENTS)
+        assoc = [row for row in result["events"] if row["name"] == "KHL_CAPTURE_ASSOC_full"]
+        self.assertEqual(len(assoc), 1)  # exactly once in output
+
+    async def test_instant_suppression_fails_association_but_restores_state(self):
+        manager = FakeManager()
+        settings = FakeSettings()
+        profiler = FakeProfiler(instants_visible=False)
+        carb = ModuleType("carb")
+        carb.__path__ = []
+        carb.settings = SimpleNamespace(get_settings=lambda: settings)
+        profiler_module = ModuleType("carb.profiler")
+        profiler_module.IProfiler = type("IProfiler", (), {"set_python_profiling_enabled": lambda *_: None})
+        profiler_module.is_profiler_active = lambda: True
+        profiler_module.acquire_profiler_interface = lambda *, plugin_name: (
+            profiler if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
+            FakeMonitor(profiler) if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
+        carb.profiler = profiler_module
+        modules = {**kit_modules(manager), "carb": carb, "carb.profiler": profiler_module}
+        request = stage_e.ProfilerCaptureRequest(capture_id="8" * 32, duration_seconds=0.01, python_profile=True)
+        with patch.dict(sys.modules, modules):
+            result = await stage_e.profiler_capture(request)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "CAPTURE_ASSOCIATION_FAILED")
+        self.assertTrue(result["result"]["restoration"]["complete"])
+        self.assertEqual(profiler.mask, 0)
+        self.assertFalse(profiler.python)
+
+    async def test_genuinely_concurrent_identical_capture_ids_accept_exactly_one(self):
+        # True intra-event-loop concurrency: both profiler_capture calls run to a
+        # scheduling point where the first is in-flight before the second starts.
+        manager = FakeManager()
+        settings = FakeSettings()
+        profiler = FakeProfiler()
+        carb = ModuleType("carb")
+        carb.__path__ = []
+        carb.settings = SimpleNamespace(get_settings=lambda: settings)
+        profiler_module = ModuleType("carb.profiler")
+        profiler_module.IProfiler = type("IProfiler", (), {"set_python_profiling_enabled": lambda *_: None})
+        profiler_module.is_profiler_active = lambda: True
+        profiler_module.acquire_profiler_interface = lambda *, plugin_name: (
+            profiler if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
+            FakeMonitor(profiler) if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
+        carb.profiler = profiler_module
+        modules = {**kit_modules(manager), "carb": carb, "carb.profiler": profiler_module}
+        request = stage_e.ProfilerCaptureRequest(capture_id="9" * 32, duration_seconds=0.02, python_profile=True)
+        with patch.dict(sys.modules, modules):
+            # Launch both before either completes so they genuinely overlap.
+            first_task = asyncio.ensure_future(stage_e.profiler_capture(request))
+            await asyncio.sleep(0)  # let the first task start and reserve its ID synchronously
+            second_task = asyncio.ensure_future(stage_e.profiler_capture(request))
+            first, second = await asyncio.gather(first_task, second_task)
+        outcomes = [first["ok"], second["ok"]]
+        self.assertEqual(outcomes.count(True), 1, "exactly one concurrent same-ID request must be accepted")
+        rejected = second if not second["ok"] else first
+        self.assertEqual(rejected["error"]["code"], "DUPLICATE_CAPTURE_ID")
+        # The accepted operation genuinely completed and restored state.
+        accepted = first if first["ok"] else second
+        self.assertTrue(accepted["result"]["restoration"]["complete"])
+        self.assertEqual(profiler.mask, 0)
+        self.assertFalse(profiler.python)
+
+    async def test_duplicate_id_rejected_even_when_accepted_in_flight(self):
+        # Covers the same case as the genuine-concurrency test but serial emission
+        # timing to make intent explicit and stabilize non-GIL timing on slow machines.
+        manager = FakeManager()
+        settings = FakeSettings()
+        profiler = FakeProfiler()
+        carb = ModuleType("carb")
+        carb.__path__ = []
+        carb.settings = SimpleNamespace(get_settings=lambda: settings)
+        profiler_module = ModuleType("carb.profiler")
+        profiler_module.IProfiler = type("IProfiler", (), {"set_python_profiling_enabled": lambda *_: None})
+        profiler_module.is_profiler_active = lambda: True
+        profiler_module.acquire_profiler_interface = lambda *, plugin_name: (
+            profiler if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
+            FakeMonitor(profiler) if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
+        carb.profiler = profiler_module
+        modules = {**kit_modules(manager), "carb": carb, "carb.profiler": profiler_module}
+        request = stage_e.ProfilerCaptureRequest(capture_id="9" * 32, duration_seconds=0.05, python_profile=True)
+        with patch.dict(sys.modules, modules):
+            task = asyncio.ensure_future(stage_e.profiler_capture(request))
+            await asyncio.sleep(0.01)
+            duplicate = await stage_e.profiler_capture(request)
+            first = await task
+        self.assertTrue(first["ok"], first)
+        self.assertFalse(duplicate["ok"])
+        self.assertEqual(duplicate["error"]["code"], "DUPLICATE_CAPTURE_ID")
+
+    async def test_create_task_failure_cleans_up_reservation(self):
+        manager = FakeManager()
+        settings = FakeSettings()
+        profiler = FakeProfiler()
+        carb = ModuleType("carb")
+        carb.__path__ = []
+        carb.settings = SimpleNamespace(get_settings=lambda: settings)
+        profiler_module = ModuleType("carb.profiler")
+        profiler_module.IProfiler = type("IProfiler", (), {"set_python_profiling_enabled": lambda *_: None})
+        profiler_module.is_profiler_active = lambda: True
+        profiler_module.acquire_profiler_interface = lambda *, plugin_name: (
+            profiler if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
+            FakeMonitor(profiler) if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
+        carb.profiler = profiler_module
+        modules = {**kit_modules(manager), "carb": carb, "carb.profiler": profiler_module}
+        request = stage_e.ProfilerCaptureRequest(capture_id="9" * 32, duration_seconds=0.01, python_profile=True)
+        with patch.dict(sys.modules, modules):
+            with patch.object(stage_e.asyncio, "create_task", side_effect=RuntimeError("no loop")):
+                with self.assertRaises(RuntimeError):
+                    await stage_e.profiler_capture(request)
+            # Reservation must be cleaned up; the ID is free again.
+            self.assertNotIn("9" * 32, stage_e._capture_operations)
+            self.assertNotIn("9" * 32, stage_e._capture_tasks)
+
+    async def test_cancelled_request_keeps_strong_cleanup_owner(self):
+        manager = FakeManager()
+        settings = FakeSettings()
+        profiler = FakeProfiler()
+        entered_update = asyncio.Event()
+        release_update = asyncio.Event()
+
+        async def update():
+            entered_update.set()
+            await release_update.wait()
+
+        carb = ModuleType("carb")
+        carb.__path__ = []
+        carb.settings = SimpleNamespace(get_settings=lambda: settings)
+        profiler_module = ModuleType("carb.profiler")
+        profiler_module.IProfiler = type(
+            "IProfiler", (), {"set_python_profiling_enabled": lambda *_: None})
+        profiler_module.is_profiler_active = lambda: True
+        profiler_module.acquire_profiler_interface = lambda *, plugin_name: (
+            profiler if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
+            FakeMonitor(profiler) if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
+        carb.profiler = profiler_module
+        app = SimpleNamespace(get_extension_manager=lambda: manager, next_update_async=update)
+        modules = {**kit_modules(manager, app), "carb": carb, "carb.profiler": profiler_module}
+        capture_id = "a" * 32
+        request = stage_e.ProfilerCaptureRequest(
+            capture_id=capture_id, duration_seconds=0.01, python_profile=True)
+        with patch.dict(sys.modules, modules):
+            request_task = asyncio.create_task(stage_e.profiler_capture(request))
+            await entered_update.wait()
+            owner = stage_e._capture_tasks[capture_id]
+            request_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await request_task
+            self.assertIs(stage_e._capture_tasks.get(capture_id), owner)
+            release_update.set()
+            result = await owner
+            await asyncio.sleep(0)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["result"]["restoration"]["complete"])
+        self.assertNotIn(capture_id, stage_e._capture_tasks)
+        self.assertEqual(profiler.mask, 0)
+        self.assertFalse(profiler.python)
 
     async def test_bounded_marker_capture_and_exact_restoration(self):
         manager = FakeManager()
@@ -394,8 +830,7 @@ class ProfilerTests(unittest.IsolatedAsyncioTestCase):
         profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
             monitor if plugin_name == "carb.profiler-cpu.plugin" else None
         )
-        profiler_module.begin = lambda mask, name: profiler.events.append({"name": name, "duration": 0.1, "indent": 0})
-        profiler_module.end = lambda mask: None
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
         carb.profiler = profiler_module
         modules = {**kit_modules(manager), "carb": carb, "carb.profiler": profiler_module}
         request = stage_e.ProfilerCaptureRequest(capture_id="1" * 32, duration_seconds=0.01, python_profile=True)
@@ -404,15 +839,51 @@ class ProfilerTests(unittest.IsolatedAsyncioTestCase):
             status = stage_e.profiler_status_impl()
         self.assertTrue(result["ok"], result)
         capture = result["result"]
-        self.assertTrue(capture["marker_found"])
+        # Python instrumentation is on, so the begin/end payload zone is dropped by
+        # this fake per measured semantics; association succeeds via the instant token.
+        self.assertTrue(capture["association_found"])
         self.assertEqual(
             status["capabilities"]["bounded_capture"],
-            "available_requires_capture_association",
+            stage_e.VERIFIED_CAPTURE_CAPABILITY,
         )
         self.assertEqual(profiler.mask, 0)
         self.assertFalse(profiler.python)
         self.assertTrue(capture["restoration"]["complete"])
         self.assertTrue(monitor.marked)
+        instant_rows = [row for row in monitor.profiler.last_events() if row["name"] == capture["association_marker"]]
+        self.assertTrue(instant_rows, "instant ownership token must appear in the published snapshot")
+        self.assertEqual(instant_rows[-1]["duration"], 0.0)
+
+    async def test_instant_token_associates_when_python_profiling_drops_zones(self):
+        manager = FakeManager()
+        settings = FakeSettings()
+        profiler = FakeProfiler()
+        carb = ModuleType("carb")
+        carb.__path__ = []
+        carb.settings = SimpleNamespace(get_settings=lambda: settings)
+        profiler_module = ModuleType("carb.profiler")
+        profiler_module.IProfiler = type("IProfiler", (), {"set_python_profiling_enabled": lambda *_: None})
+        profiler_module.is_profiler_active = lambda: True
+        profiler_module.acquire_profiler_interface = lambda *, plugin_name: (
+            profiler if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        monitor = FakeMonitor(profiler)
+        profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
+            monitor if plugin_name == "carb.profiler-cpu.plugin" else None
+        )
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
+        carb.profiler = profiler_module
+        modules = {**kit_modules(manager), "carb": carb, "carb.profiler": profiler_module}
+        request = stage_e.ProfilerCaptureRequest(capture_id="7" * 32, duration_seconds=0.01, python_profile=True)
+        with patch.dict(sys.modules, modules):
+            result = await stage_e.profiler_capture(request)
+        self.assertTrue(result["ok"], result)
+        capture = result["result"]
+        self.assertTrue(capture["association_found"], "association must hold via the instant token under python profiling")
+        self.assertTrue(capture["restoration"]["complete"])
+        marker_rows = [row for row in monitor.profiler.last_events() if row["name"] == capture["association_marker"]]
+        self.assertEqual(len(marker_rows), 1)
+        self.assertEqual(marker_rows[0]["duration"], 0.0, "only the instant token carries the marker under python")
 
     async def test_status_is_read_only_when_profiler_module_is_absent(self):
         manager = FakeManager()
@@ -498,8 +969,7 @@ class ProfilerTests(unittest.IsolatedAsyncioTestCase):
         profiler_module.acquire_profile_monitor_interface = lambda *, plugin_name: (
             FakeMonitor(profiler) if plugin_name == "carb.profiler-cpu.plugin" else None
         )
-        profiler_module.begin = lambda mask, name: profiler.events.append({"name": name})
-        profiler_module.end = lambda mask: None
+        profiler_module.InstantType = SimpleNamespace(THREAD=0, PROCESS=1)
         calls = 0
 
         async def update():

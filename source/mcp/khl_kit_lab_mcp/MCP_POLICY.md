@@ -2,7 +2,7 @@
 
 Policy version: **2.2**
 
-Policy fingerprint: **3868204d36842ed9**
+Policy fingerprint: **ede1091e6368cf82**
 
 MCP package version: **0.6.0**
 
