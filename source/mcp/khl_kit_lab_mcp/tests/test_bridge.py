@@ -34,9 +34,15 @@ class Router:
 def load_bridge():
     routers = ModuleType("omni.services.core.routers")
     routers.ServiceAPIRouter = Router
-    spec = importlib.util.spec_from_file_location("isolated_kit_lab_bridge", BRIDGE)
+    package = ModuleType("isolated_kit_lab_bridge")
+    package.__path__ = [str(BRIDGE.parent)]
+    spec = importlib.util.spec_from_file_location("isolated_kit_lab_bridge.service", BRIDGE)
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, {"omni.services.core.routers": routers}):
+    with patch.dict(sys.modules, {
+        "omni.services.core.routers": routers,
+        "isolated_kit_lab_bridge": package,
+        "isolated_kit_lab_bridge.service": module,
+    }):
         spec.loader.exec_module(module)
     return module
 
@@ -75,14 +81,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ("GET", "/khl/lab/runtime/identity"),
             ("GET", "/khl/lab/stage/summary"), ("POST", "/khl/lab/stage/summary"),
             ("POST", "/khl/lab/extensions/list"), ("GET", "/khl/lab/viewport/info"),
+            ("POST", "/khl/lab/extensions/inspect"),
+            ("POST", "/khl/lab/extensions/enable"),
+            ("POST", "/khl/lab/extensions/disable"),
+            ("POST", "/khl/lab/extensions/reload"),
+            ("GET", "/khl/lab/profiler/status"),
+            ("POST", "/khl/lab/profiler/capture"),
+            ("POST", "/khl/lab/profiler/capture/status"),
             ("POST", "/khl/lab/python/execute"), ("POST", "/khl/lab/session/reset"),
         })
         self.assertEqual(set(self.bridge.legacy_router.routes), {
             ("GET", "/khl/ai/status"), ("POST", "/khl/ai/execute"),
             ("POST", "/khl/ai/reset"),
         })
-        self.assertEqual((await self.bridge.status())["capabilities"]["read"],
-                         ["runtime.info", "runtime.identity", "stage.summary", "extensions.list", "viewport.info"])
+        self.assertEqual((await self.bridge.status())["capabilities"]["runtime_control"],
+                         ["extensions.enable", "extensions.disable", "extensions.reload", "profiler.capture"])
         self.assertFalse(hasattr(self.bridge, "PrimInspectRequest"))
         self.assertFalse(hasattr(self.bridge, "SettingGetRequest"))
 

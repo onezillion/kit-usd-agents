@@ -1,10 +1,10 @@
 # KHL Kit Lab MCP Policy
 
-Policy version: **2.1**
+Policy version: **2.2**
 
-Policy fingerprint: **09469759cd1b6289**
+Policy fingerprint: **3868204d36842ed9**
 
-MCP package version: **0.5.0**
+MCP package version: **0.6.0**
 
 This document describes the model-visible advisory policy for the local KHL Kit Lab
 runtime MCP. The canonical machine-readable entries live in
@@ -33,7 +33,7 @@ require runtime-control authorization and can lose unsaved state.
   to run or record an experiment. Infrastructure-managed experiment files do not grant
   general filesystem permission.
 - `PERSISTENT_WRITE` and `DESTRUCTIVE_EXTERNAL`: deny by default. No such tool is exposed
-  in version 0.5.0. Scoped lifecycle operations are RUNTIME_CONTROL.
+  in version 0.6.0. Scoped lifecycle and Stage E operations are RUNTIME_CONTROL.
 
 ## General Kit Python permission
 
@@ -73,6 +73,13 @@ submitted Kit Python—owns those bounded writes.
 | `kit_runtime_info` | READ_ONLY | Loopback runtime read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
 | `kit_stage_summary` | READ_ONLY | Lightweight context; opt-in full traversal; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
 | `kit_extensions_list` | READ_ONLY | Extension metadata read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
+| `kit_extension_inspect` | READ_ONLY | Complete local extension solver/graph inspection; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
+| `kit_extension_enable` | RUNTIME_CONTROL | Enables one fully local compatible plan; Kit session | Ask unless authorized | Inspect first | mutating, non-destructive, idempotent, closed-world |
+| `kit_extension_disable` | RUNTIME_CONTROL | Disables one safe reloadable extension; Kit session | Ask unless authorized | Inspect first | mutating, destructive, idempotent, closed-world |
+| `kit_extension_reload` | RUNTIME_CONTROL | Disable/rediscover/re-enable; Kit session | Ask unless authorized | Inspect first | mutating, destructive, non-idempotent, closed-world |
+| `kit_profiler_status` | READ_ONLY | Already-loaded profiler/capture state inspection; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
+| `kit_profiler_capture` | RUNTIME_CONTROL | Bounded Carbonite mask/Python instrumentation plus private evidence | Ask unless authorized | Use profiler status | mutating, destructive, non-idempotent, closed-world |
+| `kit_profiler_capture_status` | READ_ONLY | One generated capture's bounded evidence/status; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
 | `kit_viewport_info` | READ_ONLY | Viewport metadata read; none | Allow | Relevant inspection intent | read-only, idempotent, closed-world |
 | `kit_execute_python` | ELEVATED_EXECUTION | Arbitrary code in persistent Kit interpreter; session plus experiment evidence | Ask before first use | Use retained context tools or installed source/docs when sufficient | mutating, potentially destructive, non-idempotent, closed-world |
 | `kit_reset_python_session` | RUNTIME_CONTROL | Clears retained Python namespace; Kit session | Ask unless clearly requested | Avoid reset if inspection is sufficient | mutating, destructive, idempotent, closed-world |
@@ -110,6 +117,28 @@ stdout/stderr/traceback capture, and experiment source recording. Namespace rese
 not a Kit restart, task cancellation, module unload, or full cleanup. A client timeout
 does not prove in-Kit execution stopped. Preserve unrelated active experiments and
 historical records, including events naming retired tools.
+
+## Stage E extension and profiler controls
+
+Extension targets are canonical unversioned identities; Kit's installed parser preserves
+an optional tag. Inspection uses the complete internal local catalog and solver result,
+not the public listing serializer. Mutations are serialized with the lifecycle advisory
+lock, revalidate the complete local plan, active reverse dependents and Kit Lab protection
+closure, and verify fresh exact IDs. They never fetch/install, alter search paths, cascade,
+restart or kill Kit. Standalone `omni.khl.kit_lab` disable is forbidden. Self-reload is
+`RESTRICTED` because the installed runtime exposes no independent survivor actuator.
+
+Profiler status does not enable/import a disabled extension or begin capture, and reports
+installed interfaces as requiring successful event association rather than proven support. The bounded
+capture uses the already-loaded public Carbonite `IProfiler` and `IProfileMonitor` APIs,
+a fixed mask, a unique event marker, and a monotonic maximum of 10 seconds. It restores
+the exact prior mask and Python-instrumentation flag and reports concurrent-change
+conflicts. A capture succeeds only when its generated marker is present. Results are
+bounded in-memory native events persisted as private JSON under
+`/home/ubuntu/kit-ai/lab/profiles`; caller paths and filenames are not accepted. The
+installed public interface has no verified flush/export contract, so native file export
+is unsupported. Tracy, GPU capture, external viewers and standalone cProfile output are
+unsupported and never enabled automatically.
 
 ## Maintenance rule
 

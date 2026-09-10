@@ -28,6 +28,9 @@ from khl_kit_lab_mcp.experiments import ExperimentStore  # noqa: E402
 RETAINED_TOOLS = {
     "kit_lab_policy", "kit_lab_status", "kit_runtime_info", "kit_stage_summary",
     "kit_extensions_list", "kit_viewport_info", "kit_execute_python",
+    "kit_extension_inspect", "kit_extension_enable", "kit_extension_disable",
+    "kit_extension_reload", "kit_profiler_status", "kit_profiler_capture",
+    "kit_profiler_capture_status",
     "kit_reset_python_session", "kit_experiment_start", "kit_experiment_current",
     "kit_experiment_list", "kit_experiment_get", "kit_experiment_note", "kit_experiment_finish",
     "kit_lifecycle_config", "kit_status", "kit_start", "kit_stop", "kit_restart", "kit_log_paths",
@@ -41,7 +44,7 @@ class PolicyMetadataTests(unittest.TestCase):
     def test_registered_tools_exactly_match_policy_entries(self) -> None:
         tools = self.registered_tools()
         self.assertEqual({tool.name for tool in tools}, set(TOOL_POLICIES))
-        self.assertEqual(len(tools), 20)
+        self.assertEqual(len(tools), 27)
         self.assertEqual({tool.name for tool in tools}, RETAINED_TOOLS)
 
     def test_descriptions_annotations_and_meta_match_policy(self) -> None:

@@ -10,6 +10,13 @@ runtime.
 - `GET /khl/lab/stage/summary?include_statistics=false`
 - `POST /khl/lab/stage/summary` with `{"include_statistics": false}`
 - `POST /khl/lab/extensions/list`
+- `POST /khl/lab/extensions/inspect`
+- `POST /khl/lab/extensions/enable`
+- `POST /khl/lab/extensions/disable`
+- `POST /khl/lab/extensions/reload`
+- `GET /khl/lab/profiler/status`
+- `POST /khl/lab/profiler/capture`
+- `POST /khl/lab/profiler/capture/status`
 - `GET /khl/lab/viewport/info`
 - `POST /khl/lab/session/reset`
 - `POST /khl/lab/python/execute`
@@ -79,3 +86,20 @@ main loop can still make HTTP unresponsive; lifecycle OS discovery runs in the M
 All Stage A+B and `/khl/ai/*` compatibility routes remain intact. No lifecycle signal
 or launch route is exposed inside Kit. Activate this version by restarting Kit or
 explicitly reloading the extension; editing source alone does not reload it.
+
+## API 0.5.0 Stage E contract
+
+Installed-extension inspection uses Kit's complete local catalog, solver, resolved
+dependency state and active reverse-dependent graph. Mutations accept canonical
+unversioned identities only, use the immediate installed API, verify fresh state, and
+never fetch, install, cascade, change search paths, restart or kill Kit. The bridge and
+its active dependency closure are protected. Standalone self-disable is forbidden and
+self-reload is restricted because no independent survivor owns re-enable.
+
+Profiler status observes only the already-loaded public Carbonite interface and the
+native save-profile setting. Bounded capture uses `IProfiler` plus `IProfileMonitor`, a
+unique marker, a 10-second hard input maximum, and exact mask/Python-flag restoration.
+It returns success only when bounded useful in-memory events contain the generated
+marker; installed interfaces are reported as requiring capture association rather than
+as proven support. Native file export, GPU, Tracy, external viewers and private
+profiler-window methods are unsupported.

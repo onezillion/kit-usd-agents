@@ -33,7 +33,7 @@ OFFICIAL_CONFIG = {
     ],
     "isaacsim": [ROOT / "source/mcp/isaacsim_mcp/workflows/config.yaml"],
 }
-EXPECTED_COUNTS = {"omni-ui": 10, "kit": 12, "usd-code": 7, "isaacsim": 5, "kit-lab": 20}
+EXPECTED_COUNTS = {"omni-ui": 10, "kit": 12, "usd-code": 7, "isaacsim": 5, "kit-lab": 27}
 
 
 def main_tool_names(path: Path) -> list[str]:
@@ -106,14 +106,28 @@ class InventoryTests(unittest.TestCase):
             "kit_lab_policy_for_sync", package / "src/khl_kit_lab_mcp/policy.py")
         policy = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(policy)
+        read_only_tools = {
+            name for name, entry in policy.TOOL_POLICIES.items()
+            if entry["class"] == "READ_ONLY"
+        }
         reviewer = (ROOT / ".github/agents/glm-reviewer.agent.md").read_text()
         allowlist = re.findall(r"^  - kit-lab-runtime/(.+)$", reviewer, re.MULTILINE)
         self.assertTrue(allowlist)
+        self.assertEqual(set(allowlist), read_only_tools)
         for name in allowlist:
             self.assertIn(name, expected)
             self.assertEqual(policy.TOOL_POLICIES[name]["class"], "READ_ONLY")
         self.assertIn("  - kit-dev-mcp/*", reviewer)
         self.assertIn("model: GLM 5.2", reviewer)
+
+        primary = (ROOT / ".github/agents/kimi-reviewer.agent.md").read_text()
+        self.assertIn("model: Kimi Max", primary)
+        self.assertIn("  - KHL GLM Reviewer", primary)
+        self.assertIn("  - agent", primary)
+        self.assertIn("  - execute", primary)
+        self.assertIn("  - kit-dev-mcp/*", primary)
+        self.assertIn("  - kit-lab-runtime/*", primary)
+        self.assertNotIn("  - edit", primary)
 
     def test_wrappers_are_local_only_and_disable_usage_logging(self) -> None:
         for service in SERVICES.values():

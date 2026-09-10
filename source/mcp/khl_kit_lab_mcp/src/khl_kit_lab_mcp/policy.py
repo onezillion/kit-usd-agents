@@ -8,7 +8,7 @@ from copy import deepcopy
 from typing import Any
 
 
-POLICY_VERSION = "2.1"
+POLICY_VERSION = "2.2"
 PLAYGROUND_ROOT = "/World/AgentSceneLab"
 PYTHON_PERMISSION_CHOICES = [
     "Allow once",
@@ -35,6 +35,13 @@ Ask before namespace reset unless clearly authorized. Reset is not a Kit restart
 cancellation, module unload, or full cleanup. Client timeout does not prove execution stopped.
 Experiment-control tools may be used without repeated confirmation when the task explicitly
 asks to record an experiment. Preserve unrelated active experiments and existing records.
+Extension inspection and profiler status are read-only. Extension enable/disable/reload and
+bounded profiler capture are RUNTIME_CONTROL and require clear task/session authorization.
+Extension targets are canonical unversioned identities; general extension control is local-only,
+never installs packages, never cascades, and protects the Kit Lab control plane. Standalone
+Kit Lab self-disable is forbidden and self-reload is restricted. Profiler capture uses a fixed
+bounded duration and infrastructure-managed evidence root; callers cannot select output paths.
+It preserves pre-existing capture state and does not enable Tracy, GPU profiling, or external tools.
 Lifecycle status/log discovery identify only KHL_KIT_ID=nchc-kit-dev-main independently
 of HTTP, parentage, or saved PID. Start/stop/restart require task/session authorization
 for that process-control class; a clear lifecycle request suffices without repeated prompts.
@@ -151,6 +158,109 @@ TOOL_POLICIES: dict[str, dict[str, Any]] = {
         explicit_authorization=_NO_EXPLICIT_AUTH,
         safer_alternative="none",
         description="List installed Kit extensions with optional filters; do not enable or disable them.",
+        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
+    ),
+
+    "kit_extension_inspect": _entry(
+        "READ_ONLY",
+        side_effects="complete local extension catalog, solver, dependency and reverse-dependent inspection",
+        persistence="none",
+        default_behavior="allow",
+        implicit_authorization=_READ_ONLY_AUTH,
+        explicit_authorization=_NO_EXPLICIT_AUTH,
+        safer_alternative="kit_extensions_list",
+        description=(
+            "Inspect one canonical unversioned local Kit extension identity, its exact installed "
+            "candidates, enabled ID, solver result, dependencies, active reverse dependents, "
+            "reloadability and protection reasons. Refuse uncertainty rather than fetching registry data."
+        ),
+        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
+    ),
+    "kit_extension_enable": _entry(
+        "RUNTIME_CONTROL",
+        side_effects="enable one locally installed extension and its already-local compatible dependency plan",
+        persistence="current Kit process/session",
+        default_behavior="ask",
+        implicit_authorization="A clear request to enable the named local extension is sufficient.",
+        explicit_authorization="Ask unless extension mutation is already authorized for the task/session.",
+        safer_alternative="kit_extension_inspect",
+        description=(
+            "Enable one canonical unversioned extension only after complete local solver and protection "
+            "checks. Never search, download, install, change search paths, restart, or replace Kit. "
+            "Already-enabled is a verified no-op."
+        ),
+        annotations=_annotations(read_only=False, destructive=False, idempotent=True),
+    ),
+    "kit_extension_disable": _entry(
+        "RUNTIME_CONTROL",
+        side_effects="disable one reloadable installed extension after active-dependent checks",
+        persistence="current Kit process/session",
+        default_behavior="ask",
+        implicit_authorization="A clear request to disable the named local extension is sufficient.",
+        explicit_authorization="Ask unless extension mutation is already authorized for the task/session.",
+        safer_alternative="kit_extension_inspect",
+        description=(
+            "Disable one safe canonical extension without cascade or force. Refuse active dependents, "
+            "incomplete graphs, non-reloadable targets, Kit Lab self-disable, and protected control-plane dependencies."
+        ),
+        annotations=_annotations(read_only=False, destructive=True, idempotent=True),
+    ),
+    "kit_extension_reload": _entry(
+        "RUNTIME_CONTROL",
+        side_effects="disable, rediscover and re-enable one reloadable extension in the same Kit process",
+        persistence="current Kit process/session; extension-owned runtime state may be recreated",
+        default_behavior="ask",
+        implicit_authorization="A clear request to reload the named local extension is sufficient.",
+        explicit_authorization="Ask unless extension mutation is already authorized for the task/session.",
+        safer_alternative="kit_extension_inspect",
+        description=(
+            "Reload one enabled safe extension by exact-ID disable, fresh unversioned rediscovery and "
+            "verified re-enable. No restart fallback. Kit Lab self-reload is explicitly restricted."
+        ),
+        annotations=_annotations(read_only=False, destructive=True, idempotent=False),
+    ),
+    "kit_profiler_status": _entry(
+        "READ_ONLY",
+        side_effects="inspect already-loaded Carbonite profiler state and installed profiler extension metadata",
+        persistence="none",
+        default_behavior="allow",
+        implicit_authorization=_READ_ONLY_AUTH,
+        explicit_authorization=_NO_EXPLICIT_AUTH,
+        safer_alternative="none",
+        description=(
+            "Report truthful installed and already-loaded built-in profiler capabilities without enabling "
+            "extensions, acquiring a capture-starting backend, changing settings, or writing capture files."
+        ),
+        annotations=_annotations(read_only=True, destructive=False, idempotent=True),
+    ),
+    "kit_profiler_capture": _entry(
+        "RUNTIME_CONTROL",
+        side_effects="temporarily adjust Carbonite CPU mask/Python instrumentation and write bounded infrastructure evidence",
+        persistence="private infrastructure-managed JSON under the fixed profile root",
+        default_behavior="ask",
+        implicit_authorization="A clear bounded built-in profiler capture request is sufficient.",
+        explicit_authorization="Ask unless profiler runtime control and infrastructure output are authorized.",
+        safer_alternative="kit_profiler_status",
+        description=(
+            "Run a server-owned Carbonite CPU in-memory capture for at most 10 seconds, verify a unique "
+            "native event marker, restore exact prior mask/Python state, and persist bounded private evidence. "
+            "Optional Python instrumentation is part of the Carbonite trace, not cProfile .prof output. "
+            "No caller path, Tracy, GPU backend, external viewer, registry installation, or restart is used."
+        ),
+        annotations=_annotations(read_only=False, destructive=True, idempotent=False),
+    ),
+    "kit_profiler_capture_status": _entry(
+        "READ_ONLY",
+        side_effects="read one generated capture's bounded infrastructure evidence or bridge operation state",
+        persistence="none",
+        default_behavior="allow",
+        implicit_authorization=_READ_ONLY_AUTH,
+        explicit_authorization=_NO_EXPLICIT_AUTH,
+        safer_alternative="kit_profiler_status",
+        description=(
+            "Read status and bounded evidence for one generated profiler capture ID. This is not a generic "
+            "file reader and cannot select paths or cancel unrelated work."
+        ),
         annotations=_annotations(read_only=True, destructive=False, idempotent=True),
     ),
 

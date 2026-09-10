@@ -19,6 +19,13 @@ EXPECTED_TOOLS = {
     "kit_runtime_info",
     "kit_stage_summary",
     "kit_extensions_list",
+    "kit_extension_inspect",
+    "kit_extension_enable",
+    "kit_extension_disable",
+    "kit_extension_reload",
+    "kit_profiler_status",
+    "kit_profiler_capture",
+    "kit_profiler_capture_status",
     "kit_viewport_info",
     "kit_execute_python",
     "kit_reset_python_session",
@@ -113,7 +120,27 @@ async def check_tools(client: Client) -> None:
             option = schema["properties"].get("include_statistics", {})
             if option.get("type") != "boolean" or option.get("default") is not False:
                 raise SystemExit("Stage summary must default to skipping statistics")
-    print("tool count: 20")
+        if tool.name in {
+            "kit_extension_inspect", "kit_extension_enable", "kit_extension_disable",
+            "kit_extension_reload",
+        }:
+            option = schema["properties"].get("extension", {})
+            if option.get("type") != "string" or option.get("maxLength") != 160:
+                raise SystemExit(f"Extension target schema is not bounded: {tool.name}")
+            if not option.get("pattern"):
+                raise SystemExit(f"Extension target schema lacks canonical-name validation: {tool.name}")
+        if tool.name == "kit_profiler_capture":
+            option = schema["properties"].get("duration_seconds", {})
+            if option.get("type") != "number" or option.get("exclusiveMinimum") != 0 \
+                    or option.get("maximum") != 10:
+                raise SystemExit("Profiler capture duration schema is not bounded to (0, 10]")
+            if any("path" in name.lower() for name in schema["properties"]):
+                raise SystemExit("Profiler capture must not accept a caller-selected path")
+        if tool.name == "kit_profiler_capture_status":
+            option = schema["properties"].get("capture_id", {})
+            if option.get("pattern") != "^[0-9a-f]{32}$":
+                raise SystemExit("Profiler capture status requires a canonical generated ID")
+    print(f"tool count: {len(names)}")
     print("expected tools: PASS")
     print("instructions/descriptions/annotations/policy metadata: PASS")
 
@@ -131,6 +158,13 @@ async def read_only_verification(endpoint: str) -> None:
         await check_tools(client)
         payload(await client.call_tool("kit_lab_status", {}))
         validate_summary(payload(await client.call_tool("kit_stage_summary", {})))
+        profiler = payload(await client.call_tool("kit_profiler_status", {}))
+        if profiler.get("result", {}).get("mutated") is not False:
+            raise SystemExit("Profiler status must explicitly report mutated=false")
+        inspected = payload(await client.call_tool(
+            "kit_extension_inspect", {"extension": "omni.khl.kit_lab"}))
+        if inspected.get("result", {}).get("self_reload") != "RESTRICTED":
+            raise SystemExit("Kit Lab self-reload restriction is missing")
         payload(await client.call_tool("kit_experiment_current", {}))
     print("KIT_LAB_READ_ONLY_OK")
 
@@ -240,6 +274,71 @@ async def live_verification(endpoint: str) -> None:
     print("KIT_LAB_LIVE_OK")
 
 
+async def stage_e_extension_verification(endpoint: str, extension: str) -> None:
+    async with Client(endpoint) as client:
+        before = payload(await client.call_tool(
+            "kit_extension_inspect", {"extension": extension}))["result"]
+        if before.get("protection_paths") or before.get("active_reverse_dependents"):
+            raise SystemExit(f"Extension is not safe for verifier mutation: {before}")
+        baseline_enabled = before["enabled"]
+        baseline_id = before.get("enabled_id")
+        baseline_enabled_state = before.get("enabled_state")
+        if not isinstance(baseline_enabled_state, dict):
+            raise SystemExit("Extension inspection did not return a complete enabled-state snapshot")
+        disabled_dependencies = [
+            item for item in before.get("solver", {}).get("solution", [])
+            if item.get("name") != before.get("canonical_name") and not item.get("enabled")
+        ]
+        if disabled_dependencies:
+            raise SystemExit(
+                "Verifier candidate would change dependency baseline; choose an extension whose "
+                f"dependencies are already enabled: {disabled_dependencies}"
+            )
+        sequence = (["disable", "enable", "reload"] if baseline_enabled
+                    else ["enable", "reload", "disable"])
+        try:
+            for action in sequence:
+                result = payload(await client.call_tool(
+                    f"kit_extension_{action}", {"extension": extension}))["result"]
+                if result.get("terminal") != "SUCCEEDED":
+                    raise SystemExit(f"Stage E {action} did not complete: {result}")
+        finally:
+            current = payload(await client.call_tool(
+                "kit_extension_inspect", {"extension": extension}))["result"]
+            if current["enabled"] != baseline_enabled:
+                restore = "enable" if baseline_enabled else "disable"
+                payload(await client.call_tool(
+                    f"kit_extension_{restore}", {"extension": extension}))
+        after = payload(await client.call_tool(
+            "kit_extension_inspect", {"extension": extension}))["result"]
+        if (after["enabled"] != baseline_enabled or after.get("enabled_id") != baseline_id
+                or after.get("enabled_state") != baseline_enabled_state):
+            raise SystemExit(
+                "Exact extension/dependency baseline was not restored: "
+                f"before_id={baseline_id}, after_id={after.get('enabled_id')}"
+            )
+    print("KIT_LAB_STAGE_E_EXTENSION_OK", extension)
+
+
+async def stage_e_profiler_verification(endpoint: str) -> None:
+    async with Client(endpoint) as client:
+        before = payload(await client.call_tool("kit_profiler_status", {}))["result"]
+        result = payload(await client.call_tool(
+            "kit_profiler_capture", {"duration_seconds": 1.0, "python_profile": True}))["result"]
+        capture_id = result["capture_id"]
+        if not result.get("marker_found") or not result.get("restoration", {}).get("complete"):
+            raise SystemExit(f"Profiler capture lacked associated events/restoration: {result}")
+        evidence = payload(await client.call_tool(
+            "kit_profiler_capture_status", {"capture_id": capture_id}))
+        if not evidence.get("complete"):
+            raise SystemExit("Profiler evidence was not finalized")
+        after = payload(await client.call_tool("kit_profiler_status", {}))["result"]
+        if before.get("capture_active") != after.get("capture_active"):
+            raise SystemExit("Profiler capture state was not restored")
+    print("capture ID:", capture_id)
+    print("KIT_LAB_STAGE_E_PROFILER_OK")
+
+
 async def post_restart_verification(endpoint: str, experiment_id: str) -> None:
     validate_experiment_id(experiment_id)
     async with Client(endpoint) as client:
@@ -270,6 +369,10 @@ def main() -> None:
     mode.add_argument("--full", action="store_true",
                       help="Opt in to durable experiment writes and Kit Python execution (2 + 2).")
     mode.add_argument("--lifecycle", action="store_true", help="Read-only baseline plus configured lifecycle identity/log checks")
+    mode.add_argument("--stage-e-extension", metavar="CANONICAL_NAME",
+                      help="Explicitly opt in to enable/disable/reload of one pre-inspected safe local extension")
+    mode.add_argument("--stage-e-profiler", action="store_true",
+                      help="Explicitly opt in to one 1-second CPU/Python profiler capture and private evidence write")
     arguments = parser.parse_args()
     endpoint = os.environ.get("KIT_LAB_MCP_ENDPOINT", "http://127.0.0.1:9910/mcp")
     installed_mcp = version("mcp")
@@ -281,6 +384,10 @@ def main() -> None:
         asyncio.run(post_restart_verification(endpoint, arguments.post_restart))
     elif arguments.full:
         asyncio.run(live_verification(endpoint))
+    elif arguments.stage_e_extension:
+        asyncio.run(stage_e_extension_verification(endpoint, arguments.stage_e_extension))
+    elif arguments.stage_e_profiler:
+        asyncio.run(stage_e_profiler_verification(endpoint))
     else:
         asyncio.run(read_only_verification(endpoint))
         if arguments.lifecycle:

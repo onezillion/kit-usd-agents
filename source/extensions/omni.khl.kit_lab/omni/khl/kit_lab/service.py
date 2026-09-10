@@ -12,6 +12,8 @@ from typing import Any, Optional
 from omni.services.core.routers import ServiceAPIRouter
 from pydantic import BaseModel, Field
 
+from . import stage_e
+
 
 router = ServiceAPIRouter(
     prefix="/khl/lab",
@@ -28,7 +30,7 @@ legacy_router = ServiceAPIRouter(
 _namespace = {}
 _execute_lock = asyncio.Lock()
 
-API_VERSION = "0.4.0"
+API_VERSION = stage_e.API_VERSION
 MAX_COLLECTION_ITEMS = 256
 MAX_STRING_LENGTH = 20_000
 
@@ -51,6 +53,11 @@ class ExtensionsListRequest(BaseModel):
     enabled_only: bool = False
     search: Optional[str] = None
     limit: int = Field(500, ge=1, le=5000)
+
+
+ExtensionTargetRequest = stage_e.ExtensionTargetRequest
+ProfilerCaptureRequest = stage_e.ProfilerCaptureRequest
+ProfilerCaptureStatusRequest = stage_e.ProfilerCaptureStatusRequest
 
 
 def reset_namespace():
@@ -240,13 +247,23 @@ def _status_payload(service_name):
         "namespace_keys": sorted(
             key for key in _namespace if not key.startswith("__")
         ),
+        "bridge_generation": stage_e.bridge_generation(),
         "capabilities": {
             "read": [
                 "runtime.info",
                 "runtime.identity",
                 "stage.summary",
                 "extensions.list",
+                "extensions.inspect",
+                "profiler.status",
+                "profiler.capture_status",
                 "viewport.info",
+            ],
+            "runtime_control": [
+                "extensions.enable",
+                "extensions.disable",
+                "extensions.reload",
+                "profiler.capture",
             ],
             "development": [
                 "python.execute",
@@ -314,6 +331,7 @@ def _runtime_identity_impl():
         "pid": os.getpid(),
         "start_ticks": start_ticks,
         "api_version": API_VERSION,
+        "bridge_generation": stage_e.bridge_generation(),
         "ready": bool(omni.kit.app.get_app().is_app_ready()),
         "native_log_path": _json_safe(carb.settings.get_settings().get("/log/file")),
     }
@@ -473,6 +491,41 @@ async def extensions_list(request: ExtensionsListRequest):
         "extensions.list",
         lambda: _extensions_list_impl(request),
     )
+
+
+@router.post("/extensions/inspect", summary="Inspect one installed extension")
+async def extension_inspect(request: ExtensionTargetRequest):
+    return await stage_e.extension_inspect(request.extension)
+
+
+@router.post("/extensions/enable", summary="Enable one local installed extension")
+async def extension_enable(request: ExtensionTargetRequest):
+    return await stage_e.extension_mutation("enable", request.extension)
+
+
+@router.post("/extensions/disable", summary="Disable one safe installed extension")
+async def extension_disable(request: ExtensionTargetRequest):
+    return await stage_e.extension_mutation("disable", request.extension)
+
+
+@router.post("/extensions/reload", summary="Reload one safe enabled extension")
+async def extension_reload(request: ExtensionTargetRequest):
+    return await stage_e.extension_mutation("reload", request.extension)
+
+
+@router.get("/profiler/status", summary="Inspect built-in profiler capabilities")
+async def profiler_status():
+    return await stage_e.profiler_status()
+
+
+@router.post("/profiler/capture", summary="Run one bounded built-in profiler capture")
+async def profiler_capture(request: ProfilerCaptureRequest):
+    return await stage_e.profiler_capture(request)
+
+
+@router.post("/profiler/capture/status", summary="Read one profiler capture operation")
+async def profiler_capture_status(request: ProfilerCaptureStatusRequest):
+    return await stage_e.profiler_capture_status(request.capture_id)
 
 
 def _viewport_info_impl():

@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import math
 import os
 from typing import Annotated, Any, Literal
 
@@ -11,7 +13,7 @@ from pydantic import Field
 
 from . import __version__
 from .client import KitLabClient, KitLabClientError
-from .lifecycle import KIT_ID, KitLifecycle, LifecycleError, load_config
+from .lifecycle import KIT_ID, KitLifecycle, LifecycleError, load_config, mutation_lock
 from .experiments import (
     MAX_EVENT_LIMIT,
     MAX_LIST_LIMIT,
@@ -35,6 +37,7 @@ from .policy import (
     tool_description,
     tool_meta,
 )
+from .profiles import ProfileStore, ProfileStoreError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -61,7 +64,9 @@ mcp = MCPServer(
 )
 client = KitLabClient()
 experiments = ExperimentStore()
+profiles = ProfileStore()
 _lifecycle_instance: KitLifecycle | None = None
+_background_control_tasks: set[asyncio.Task] = set()
 
 
 def _lifecycle() -> KitLifecycle:
@@ -143,6 +148,30 @@ async def _post(
     return await _recorded_call(tool_name, payload, operation)
 
 
+async def _shielded_control_post(
+    tool_name: str,
+    path: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the lifecycle advisory lock and recording alive after client cancellation."""
+    experiment_id = experiments.current_id()
+
+    async def worker() -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            try:
+                with mutation_lock():
+                    return _tool_result(await client.post(path, payload))
+            except (KitLabClientError, LifecycleError) as exc:
+                raise ToolError(f"{getattr(exc, 'code', 'KIT_LAB_ERROR')}: {exc}") from exc
+
+        return await invoke_and_record(experiments, experiment_id, tool_name, payload, operation)
+
+    task = asyncio.create_task(worker(), name=f"{tool_name}-control")
+    _background_control_tasks.add(task)
+    task.add_done_callback(_background_control_tasks.discard)
+    return await asyncio.shield(task)
+
+
 async def _runtime_snapshot() -> dict[str, Any]:
     snapshot: dict[str, Any] = {"captured_at": utc_now()}
     for key, path in (
@@ -211,6 +240,177 @@ async def kit_extensions_list(
             "limit": limit,
         },
     )
+
+
+@mcp.tool(title="Inspect installed Kit extension", **_tool_options("kit_extension_inspect"))
+async def kit_extension_inspect(
+    extension: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=160,
+            pattern=r"^[A-Za-z0-9_.]+(?:-[A-Za-z][A-Za-z0-9_.]*)?$",
+            description="Canonical unversioned extension identity, retaining an optional Kit tag.",
+        ),
+    ],
+) -> dict[str, Any]:
+    """Resolve one local extension and its complete mutation-safety evidence."""
+    return await _post(
+        "kit_extension_inspect", "/khl/lab/extensions/inspect", {"extension": extension}
+    )
+
+
+@mcp.tool(title="Enable installed Kit extension", **_tool_options("kit_extension_enable"))
+async def kit_extension_enable(
+    extension: Annotated[
+        str, Field(min_length=1, max_length=160,
+                   pattern=r"^[A-Za-z0-9_.]+(?:-[A-Za-z][A-Za-z0-9_.]*)?$")
+    ],
+) -> dict[str, Any]:
+    """Enable one safely resolved local extension; never install from a registry."""
+    return await _shielded_control_post(
+        "kit_extension_enable", "/khl/lab/extensions/enable", {"extension": extension}
+    )
+
+
+@mcp.tool(title="Disable installed Kit extension", **_tool_options("kit_extension_disable"))
+async def kit_extension_disable(
+    extension: Annotated[
+        str, Field(min_length=1, max_length=160,
+                   pattern=r"^[A-Za-z0-9_.]+(?:-[A-Za-z][A-Za-z0-9_.]*)?$")
+    ],
+) -> dict[str, Any]:
+    """Disable one safe extension without cascading to active dependents."""
+    return await _shielded_control_post(
+        "kit_extension_disable", "/khl/lab/extensions/disable", {"extension": extension}
+    )
+
+
+@mcp.tool(title="Reload installed Kit extension", **_tool_options("kit_extension_reload"))
+async def kit_extension_reload(
+    extension: Annotated[
+        str, Field(min_length=1, max_length=160,
+                   pattern=r"^[A-Za-z0-9_.]+(?:-[A-Za-z][A-Za-z0-9_.]*)?$")
+    ],
+) -> dict[str, Any]:
+    """Disable, rediscover and re-enable one safe extension in the same Kit process."""
+    return await _shielded_control_post(
+        "kit_extension_reload", "/khl/lab/extensions/reload", {"extension": extension}
+    )
+
+
+@mcp.tool(title="Inspect built-in Kit profiler", **_tool_options("kit_profiler_status"))
+async def kit_profiler_status() -> dict[str, Any]:
+    """Report installed, already-loaded profiler capabilities without activating capture."""
+    return await _get("kit_profiler_status", "/khl/lab/profiler/status")
+
+
+async def _profile_capture_worker(
+    capture_id: str,
+    duration_seconds: float,
+    python_profile: bool,
+    experiment_id: str | None,
+) -> dict[str, Any]:
+    payload = {
+        "capture_id": capture_id,
+        "duration_seconds": duration_seconds,
+        "python_profile": python_profile,
+        "experiment_id": experiment_id,
+    }
+
+    async def operation() -> dict[str, Any]:
+        try:
+            with mutation_lock():
+                response = await client.post("/khl/lab/profiler/capture", payload)
+        except (KitLabClientError, LifecycleError) as exc:
+            response = {
+                "ok": False,
+                "operation": "profiler.capture",
+                "error": {"code": getattr(exc, "code", "KIT_LAB_ERROR"), "message": str(exc)},
+            }
+        try:
+            evidence = await asyncio.to_thread(profiles.finish, capture_id, response)
+        except ProfileStoreError as exc:
+            return {
+                "ok": False,
+                "operation": "profiler.capture",
+                "error": {"code": "PROFILE_EVIDENCE_FAILED", "message": str(exc)},
+                "capture": response,
+            }
+        result = response.setdefault("result", {})
+        if isinstance(result, dict):
+            result["infrastructure_output"] = evidence
+        return response
+
+    return await invoke_and_record(
+        experiments,
+        experiment_id,
+        "kit_profiler_capture",
+        {"duration_seconds": duration_seconds, "python_profile": python_profile},
+        operation,
+    )
+
+
+@mcp.tool(title="Capture bounded built-in Kit profile", **_tool_options("kit_profiler_capture"))
+async def kit_profiler_capture(
+    duration_seconds: Annotated[
+        float,
+        Field(gt=0, le=10, description="Responsive-runtime capture bound in seconds; maximum 10."),
+    ] = 1.0,
+    python_profile: Annotated[
+        bool,
+        Field(description="Include Carbonite Python-call instrumentation; not cProfile output."),
+    ] = False,
+) -> dict[str, Any]:
+    """Run one server-owned bounded CPU capture and persist bounded infrastructure evidence."""
+    if not isinstance(duration_seconds, (int, float)) or isinstance(duration_seconds, bool):
+        raise ToolError("INVALID_CAPTURE_BOUND: duration_seconds must be numeric")
+    if not math.isfinite(duration_seconds):
+        raise ToolError("INVALID_CAPTURE_BOUND: duration_seconds must be finite")
+    status = await _lifecycle().status()
+    if status.get("state") != "READY":
+        raise ToolError(f"KIT_NOT_READY: {status.get('state')}")
+    experiment_id = experiments.current_id()
+    request_evidence = {
+        "duration_seconds": duration_seconds,
+        "python_profile": python_profile,
+        "experiment_id": experiment_id,
+        "kit_id": status.get("kit_id"),
+        "process": status.get("process"),
+        "bridge_api": status.get("bridge_api"),
+    }
+    try:
+        allocation = await asyncio.to_thread(profiles.create, request_evidence)
+    except ProfileStoreError as exc:
+        raise ToolError(f"PROFILE_OUTPUT_UNSAFE: {exc}") from exc
+    capture_id = allocation["capture_id"]
+    task = asyncio.create_task(
+        _profile_capture_worker(capture_id, float(duration_seconds), python_profile, experiment_id),
+        name=f"kit-profiler-capture-{capture_id}",
+    )
+    _background_control_tasks.add(task)
+    task.add_done_callback(_background_control_tasks.discard)
+    return await asyncio.shield(task)
+
+
+@mcp.tool(title="Read Kit profiler capture status", **_tool_options("kit_profiler_capture_status"))
+async def kit_profiler_capture_status(
+    capture_id: Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")],
+) -> dict[str, Any]:
+    """Read bounded infrastructure evidence or current bridge state for one generated ID."""
+    try:
+        evidence = await asyncio.to_thread(profiles.get, capture_id)
+    except (ProfileStoreError, FileNotFoundError, json.JSONDecodeError) as exc:
+        raise ToolError(f"CAPTURE_NOT_FOUND: {exc}") from exc
+    if evidence["complete"]:
+        return evidence
+    try:
+        bridge = await client.post(
+            "/khl/lab/profiler/capture/status", {"capture_id": capture_id}
+        )
+    except KitLabClientError as exc:
+        bridge = {"ok": False, "error": {"code": "BRIDGE_UNAVAILABLE", "message": str(exc)}}
+    return {**evidence, "bridge": bridge}
 
 
 @mcp.tool(title="Inspect active viewport", **_tool_options("kit_viewport_info"))

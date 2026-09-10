@@ -9,7 +9,7 @@ only process groups it started and records its state outside Git.
 | NVIDIA Kit MCP | `127.0.0.1:9902/mcp` | shared NVIDIA | 12 | read-only knowledge/retrieval |
 | USD Code MCP | `127.0.0.1:9903/mcp` | shared NVIDIA | 7 | read-only knowledge/retrieval |
 | Isaac Sim MCP | `127.0.0.1:9904/mcp` | shared NVIDIA | 5 | read-only knowledge/retrieval |
-| KHL Kit Lab MCP | `127.0.0.1:9910/mcp` | separate Kit Lab | 20 | mixed, governed by its own policy |
+| KHL Kit Lab MCP | `127.0.0.1:9910/mcp` | separate Kit Lab | 27 | mixed, governed by its own policy |
 
 The default shared environment is `/home/ubuntu/kit-ai/venvs/kit-usd-mcp`.
 Set `KIT_USD_MCP_VENV` or pass `--venv ABSOLUTE_PATH` to override it. Kit Lab
@@ -143,6 +143,13 @@ KHL Kit Lab MCP:
 - `kit_runtime_info`
 - `kit_stage_summary`
 - `kit_extensions_list`
+- `kit_extension_inspect`
+- `kit_extension_enable`
+- `kit_extension_disable`
+- `kit_extension_reload`
+- `kit_profiler_status`
+- `kit_profiler_capture`
+- `kit_profiler_capture_status`
 - `kit_viewport_info`
 - `kit_execute_python`
 - `kit_reset_python_session`
@@ -159,10 +166,11 @@ KHL Kit Lab MCP:
 - `kit_restart`
 - `kit_log_paths`
 
-Kit Lab 0.5.0 develops and debugs reusable installed-version Kit/USD Python. Its
+Kit Lab 0.6.0 develops and debugs reusable installed-version Kit/USD Python. Its
 stage summary skips full prim traversal unless `include_statistics=true`; uncomputed
-counts are null. Bridge API 0.3.0 or newer must be activated separately for the new POST summary
-contract. The NVIDIA knowledge services and their inventories are unchanged.
+counts are null. Bridge API 0.5.0 adds guarded local extension control and a bounded
+Carbonite in-memory capture surface that requires native marker association before
+reporting success. The NVIDIA knowledge services and inventories are unchanged.
 
 Kit Lab annotations, descriptions, `_meta`, and server instructions must match
 `source/mcp/khl_kit_lab_mcp/MCP_POLICY.md` and its canonical Python policy.

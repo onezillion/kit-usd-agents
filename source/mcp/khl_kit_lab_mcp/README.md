@@ -1,10 +1,11 @@
 # KHL Kit Lab Runtime MCP
 
-Version 0.5.0 is the local runtime adapter for the persistent
+Version 0.6.0 is the local runtime adapter for the persistent
 `omni.khl.kit_lab` extension. It preserves the Phase 2C experiment layer and
 focuses on developing, executing, observing, and debugging real Kit/USD Python.
 Stage C+D adds persistent-identity lifecycle management and native log-path discovery.
-The bridge API/extension is 0.4.0; the existing 14-tool Stage A+B baseline is preserved.
+Stage E adds guarded extension control and bounded built-in profiling. The bridge
+API/extension is 0.5.0; all 20 pre-Stage-E tools are preserved.
 
 The package contains no model, embedding, retrieval, reranking, hosted API,
 Kubernetes or LLM-provider logic. It does not depend on the Kit knowledge MCP.
@@ -64,7 +65,7 @@ The server exposes one policy through four synchronized surfaces:
 - the read-only `kit_lab_policy` tool;
 - [`MCP_POLICY.md`](MCP_POLICY.md), the repo-local human-readable manual.
 
-Policy fingerprint: `09469759cd1b6289`
+Policy fingerprint: `3868204d36842ed9`
 
 Read-only context inspection is allowed freely. Develop reusable installed-version
 Kit/USD scripts, extensions, and scripting-component source through authorized Python.
@@ -93,12 +94,19 @@ Read-only policy and inspection tools:
 - `kit_runtime_info`
 - `kit_stage_summary`
 - `kit_extensions_list`
+- `kit_extension_inspect`
+- `kit_profiler_status`
+- `kit_profiler_capture_status`
 - `kit_viewport_info`
 
 Elevated/runtime-control tools:
 
 - `kit_execute_python`
 - `kit_reset_python_session`
+- `kit_extension_enable`
+- `kit_extension_disable`
+- `kit_extension_reload`
+- `kit_profiler_capture`
 
 Experiment tools:
 
@@ -132,6 +140,23 @@ Python exceptions returned by Kit remain legitimate tool results and are
 recorded with `result_class=python_exception_result`. Transport or MCP-side
 failures use `result_class=transport_or_server_failure`.
 
+## Installed extensions and profiler (Stage E)
+
+`kit_extension_inspect` resolves one unversioned local identity against the complete
+internal catalog, installed solver, effective dependency graph, active reverse dependents,
+reloadability and the Kit Lab protection closure. Enable/disable/reload are local-only,
+serialized with lifecycle mutation, and never install, cascade, change search paths, or
+restart Kit. Kit Lab self-disable is forbidden and self-reload is explicitly restricted.
+
+`kit_profiler_status` reports already-loaded Carbonite availability without mutation and
+does not claim support until a capture has supplied associated events.
+`kit_profiler_capture` runs for 10 seconds or less, requires a generated marker in native
+in-memory CPU events before returning success, and restores prior capture mask/Python instrumentation. Optional
+Python instrumentation is Carbonite trace data, not a cProfile `.prof` file. Bounded JSON
+evidence is placed in a generated private directory below `KIT_LAB_PROFILE_ROOT`;
+callers cannot choose paths. Native profiler file export, GPU capture, Tracy, external
+viewers and profiler-extension installation are unsupported by this surface.
+
 ## Install and static tests
 
 From the repository root:
@@ -162,7 +187,7 @@ From a third terminal:
 source/mcp/khl_kit_lab_mcp/verify-user-local.sh
 ```
 
-Default verification is read-only: it checks exactly 20 tools, synchronized metadata,
+Default verification is read-only: it checks exactly 27 tools, synchronized metadata,
 runtime status, lightweight summary, and the current experiment. An old loaded bridge
 will fail the POST summary check (HTTP 405); activate bridge API 0.3.0 or newer separately (0.4.0 for lifecycle).
 
@@ -194,6 +219,7 @@ source/mcp/khl_kit_lab_mcp/verify-user-local.sh --post-restart <experiment-id>
 | `KIT_LAB_MCP_PORT` | `9910` | MCP port |
 | `KIT_LAB_ALLOW_REMOTE` | unset | Explicit remote Kit-target opt-in |
 | `KIT_LAB_EXPERIMENT_ROOT` | `/home/ubuntu/kit-ai/lab/experiments` | Durable experiment storage |
+| `KIT_LAB_PROFILE_ROOT` | `/home/ubuntu/kit-ai/lab/profiles` | Private bounded profiler evidence |
 
 ## Safety notes
 
@@ -318,6 +344,6 @@ used. Host access and separate task/session native-log consent remain necessary 
 later content read. Setup checks currently observable process permissions but cannot
 grant OS/sandbox access or predict future permission changes.
 
-The default verifier checks the 20-tool metadata and unchanged Stage A+B read-only
+The default verifier checks the 27-tool metadata and unchanged Stage A+B read-only
 runtime behavior. Add `--lifecycle` for configured READY identity/log association checks;
 this remains read-only and never starts, stops, or restarts Kit.
