@@ -26,3 +26,4 @@ __pycache__/
 
 # User-local MCP credentials and runtime state never belong in Git.
 /source/mcp/.env
+.vscode/chatLanguageModels.json
